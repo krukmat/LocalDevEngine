@@ -64,3 +64,15 @@ storage:
 pipeline:
   max_qa_iterations: 2 # Reintentos de QA -> rediseño antes de rendirse
   request_timeout_seconds: 300 # Modelos "thinking" (qwen3.6) + swap en frío pueden tardar minutos
+  closing_report: true # Manager compara el resultado final contra su propio outline inicial.
+                        # Kill-switch para A/B el costo contra un baseline sin este stage.
+                        # Ver docs/plan-macro-loop-manager-hitl.md (Fase 1).
+  closing_report_max_implementation_chars: 8000 # el closing report es el prompt más grande
+                                                 # del pipeline (goal+breakdown+plan+código) —
+                                                 # trunca la implementación con marcador visible.
+  max_macro_iterations: 1 # Fase 2: vueltas EXTRA del pipeline completo como máximo tras un
+                           # closing_report con DEVIATION en UNEXPLAINED/UNKNOWN. El humano
+                           # igual tiene que confirmar cada vuelta (main.py chat) — este es
+                           # solo el tope duro. NOTA: el gate empírico del plan (correr 4
+                           # queries reales y verificar que aparece ≥1 DROPPED genuino antes
+                           # de construir esto) no se ejecutó — ver docs/plan-macro-loop-manager-hitl.md.

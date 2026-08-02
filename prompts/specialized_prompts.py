@@ -124,3 +124,27 @@ FEEDBACK: <specific, actionable feedback for the Architect/Implementer to addres
         """Feeds QA feedback back into the Architect to revise the plan (the design feedback loop)."""
         return f"""GOAL:\n{goal}\n\nPROJECT CONTEXT:\n{context}\n\nPREVIOUS PLAN:\n{previous_plan}\n\nQA FEEDBACK:\n{feedback}\n\nTASK FOR ARCHITECT:
 Revise the plan to address the QA feedback above. Keep what already works; fix only what was flagged."""
+
+    @staticmethod
+    def get_manager_closing_report_template(goal: str, breakdown: str, plan: str, implementation: str) -> str:
+        """Closing report: Manager compares the final result against its own original outline.
+        A step that was changed for a good reason (e.g. a QA-driven correction) is NOT a deviation —
+        only unexplained gaps or unrequested additions are. This distinction is the whole point of the
+        report: a naive aligned/deviated check would flag every legitimate correction as a problem."""
+        return f"""ORIGINAL GOAL:\n{goal}\n\nYOUR ORIGINAL OUTLINE:\n{breakdown}\n\nFINAL APPROVED PLAN:\n{plan}\n\nFINAL IMPLEMENTATION:\n{implementation}\n\nTASK FOR MANAGER (CLOSING REPORT):
+Compare the final plan and implementation against YOUR ORIGINAL OUTLINE above. For each step in your
+outline, classify what happened to it:
+- COVERED: the step was implemented as originally intended.
+- ADAPTED: the step was implemented differently than outlined, but for a good reason (e.g. a QA
+  finding, a technical constraint discovered during design). This is a legitimate correction, NOT a
+  deviation — do not flag it as a problem.
+- DROPPED: the step is missing from the final result with no explanation visible in the plan or code.
+- ADDED: the final result includes something not in your original outline, with no clear justification.
+
+List each outline step with its classification in one line. Then give an overall verdict: only DROPPED
+or unjustified ADDED items count as a real deviation — COVERED and ADAPTED items do not.
+
+Respond in EXACTLY this format:
+DEVIATION: NONE or JUSTIFIED or UNEXPLAINED
+SUMMARY: <2-4 sentences: what happened overall, and if UNEXPLAINED, exactly what was dropped or added
+without justification.>"""

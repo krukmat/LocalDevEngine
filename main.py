@@ -83,6 +83,19 @@ class DevOrchestratorCLI:
             if result.get("qa_feedback"):
                 print(result["qa_feedback"])
 
+        deviation = result.get("deviation")
+        if deviation is not None:
+            deviation_colors = {
+                "NONE": Colors.GREEN,
+                "JUSTIFIED": Colors.CYAN,
+                "UNEXPLAINED": Colors.YELLOW,
+                "UNKNOWN": Colors.YELLOW,
+            }
+            color = deviation_colors.get(deviation, Colors.YELLOW)
+            print(f"{color}--- REPORTE DE CIERRE: DEVIATION={deviation} ---{Colors.ENDC}")
+            if not streamed and result.get("closing_report"):
+                print(result["closing_report"])
+
     def _make_stage_printer(self):
         """Builds an on_chunk callback that prints a stage header (colored, once) the
         first time each stage streams, then streams its text live. Stages repeat across
@@ -95,6 +108,7 @@ class DevOrchestratorCLI:
             "design_plan": (Colors.GREEN, "PLAN DEL ARQUITECTO"),
             "design_revision": (Colors.YELLOW, "REVISIÓN DEL PLAN"),
             "implementation": (Colors.BLUE, "IMPLEMENTACIÓN SENIOR"),
+            "closing_report": (Colors.CYAN, "REPORTE DE CIERRE (Manager)"),
         }
 
         def on_chunk(text: str, stage: str, attempt: Optional[int]):
@@ -110,13 +124,62 @@ class DevOrchestratorCLI:
         return on_chunk
 
     async def ask_once(self, query: str):
-        """Executes a single inquiry and exits."""
+        """Executes a single inquiry and exits. Never prompts — the macro-loop re-run
+        offered after a closing report is a `chat`-only feature (see _maybe_offer_macro_rerun):
+        `ask` is the scriptable, non-interactive path and must not block on input()."""
         try:
             result = await self.orchestrator.run_complex_task(query, on_chunk=self._make_stage_printer())
             print()  # close the last streamed line before the summary banners
             self._print_result(result, streamed=True)
+            if self._macro_rerun_available(result):
+                print(f"{Colors.CYAN}(Re-ejecución con el reporte de cierre como feedback disponible en 'python main.py chat'){Colors.ENDC}")
         except ModelCallError as e:
             print(f"{Colors.RED}❌ Fallo llamando al modelo: {e}{Colors.ENDC}")
+
+    def _macro_rerun_available(self, result: dict) -> bool:
+        """True if this result's deviation/QA state would make a macro-loop re-run
+        worth offering — an UNEXPLAINED/UNKNOWN closing report, or QA giving up after
+        max_qa_iterations. Shared between ask_once (informational only) and
+        interactive_shell (actually offers the prompt), so the two paths can't drift
+        on what counts as 'worth re-running'."""
+        if result.get("fast_path"):
+            return False
+        deviation = result.get("deviation")
+        qa_approved = result.get("qa_approved")
+        return deviation in ("UNEXPLAINED", "UNKNOWN") or qa_approved is False
+
+    async def _maybe_offer_macro_rerun(self, query: str, result: dict) -> dict:
+        """After printing a full-pipeline result in `chat`, offers one human-confirmed
+        re-run of the whole pipeline if the closing report found something actionable
+        (see docs/plan-macro-loop-manager-hitl.md, FASE 2). Default is NO — an empty
+        Enter must decline, since the cost being confirmed is a full ~8-11 minute pipeline
+        pass, not a cheap retry. Returns the possibly-updated result (the re-run's result
+        if the user accepted, otherwise the original)."""
+        if not self._macro_rerun_available(result):
+            return result
+        max_macro_iterations = self.orchestrator.config.get('pipeline', {}).get('max_macro_iterations', 1)
+        macro_iteration = result.get("macro_iteration", 1)
+        if macro_iteration > max_macro_iterations:
+            return result
+
+        answer = input(
+            f"{Colors.YELLOW}⟳ El Manager detectó desvío sin explicar (o QA no aprobó). "
+            f"¿Re-ejecutar con este reporte como feedback?\n"
+            f"  (otra vuelta completa del pipeline, ~8-11 min) [s/N]: {Colors.ENDC}"
+        ).strip().lower()
+        if answer != "s":
+            return result
+
+        rerun_result = await self.orchestrator.run_complex_task(
+            query,
+            on_chunk=self._make_stage_printer(),
+            prior_breakdown=result.get("breakdown"),
+            prior_report=result.get("closing_report"),
+            macro_iteration=macro_iteration + 1,
+        )
+        print()
+        self._print_result(rerun_result, streamed=True)
+        return rerun_result
 
     async def interactive_shell(self):
         """The REPL (Read-Eval-Print Loop) mode for deep work sessions."""
@@ -152,6 +215,7 @@ class DevOrchestratorCLI:
                     result = await self.orchestrator.run_complex_task(user_input, on_chunk=self._make_stage_printer())
                     print()
                     self._print_result(result, streamed=True)
+                    await self._maybe_offer_macro_rerun(user_input, result)
 
             except KeyboardInterrupt:
                 print("\n\nInterrupción detectada. Saliendo...")

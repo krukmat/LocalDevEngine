@@ -14,6 +14,8 @@ from prompts.specialized_prompts import PromptRegistry
 
 _VERDICT_RE = re.compile(r"VERDICT:\s*(APPROVED|NEEDS_REVISION)", re.IGNORECASE)
 _FEEDBACK_RE = re.compile(r"FEEDBACK:\s*(.*)", re.IGNORECASE | re.DOTALL)
+_DEVIATION_RE = re.compile(r"DEVIATION:\s*(NONE|JUSTIFIED|UNEXPLAINED)", re.IGNORECASE)
+_SUMMARY_RE = re.compile(r"SUMMARY:\s*(.*)", re.IGNORECASE | re.DOTALL)
 
 
 def _split_plan_sections(plan: str, section_names: Tuple[str, ...]) -> Optional["Dict[str, str]"]:
@@ -249,21 +251,54 @@ class Orchestrator:
         approved = bool(verdict_match) and verdict_match.group(1).upper() == "APPROVED"
         return approved, feedback
 
+    def _parse_closing_report(self, report_text: str) -> Tuple[str, str]:
+        """
+        Parses the Manager's closing report ('DEVIATION: ...' / 'SUMMARY: ...').
+        Unlike _parse_verdict, this fails SOFT: an unparseable report must never
+        block the pipeline, since nothing downstream depends on it — it's a report,
+        not a gate. Missing/unrecognized DEVIATION becomes "UNKNOWN" and the raw
+        text is kept as the summary so a human can still read it.
+        """
+        deviation_match = _DEVIATION_RE.search(report_text)
+        summary_match = _SUMMARY_RE.search(report_text)
+        if not deviation_match:
+            return "UNKNOWN", report_text.strip()
+        summary = summary_match.group(1).strip() if summary_match else report_text.strip()
+        return deviation_match.group(1).upper(), summary
+
     async def run_complex_task(
         self,
         user_query: str,
         on_chunk: Optional[Callable[[str, str, Optional[int]], None]] = None,
+        prior_breakdown: Optional[str] = None,
+        prior_report: Optional[str] = None,
+        macro_iteration: int = 1,
     ) -> Dict[str, Any]:
         """
         Main workflow: Router -> (fast path | RAG -> Manager -> Architect<->QA design gate
-        -> Implementer<->QA implementation check).
+        -> Implementer<->QA implementation check -> Manager closing report).
 
         If on_chunk is given, it's invoked as on_chunk(text, stage, attempt) with text
         fragments as they stream in from the model, for every stage whose output is
         shown to the user directly (fast-path answer, design plan/revision,
-        implementation) — not QA stages, whose raw text is never printed, only their
-        parsed verdict/feedback. Useful for a CLI/UI to show live progress instead of
-        a multi-minute silent wait per stage.
+        implementation, closing report) — not QA stages, whose raw text is never
+        printed, only their parsed verdict/feedback. Useful for a CLI/UI to show live
+        progress instead of a multi-minute silent wait per stage.
+
+        prior_breakdown/prior_report/macro_iteration support the macro-loop (re-running
+        the full pipeline once, with the previous closing report fed back as feedback):
+        - prior_breakdown, if given, skips the Manager task_breakdown call and the Router
+          call — re-classifying risks a fast-path misroute that would discard the whole
+          prior attempt (see docs/plan-macro-loop-manager-hitl.md, hallazgo 5) — and is
+          used as-is, so the second closing report stays comparable to the first (a fresh
+          outline would move the baseline it's being measured against).
+        - prior_report, if given, is folded into the RAG context as a
+          "PREVIOUS ATTEMPT — MANAGER FINDINGS" block so the Architect starts from the
+          gaps already found instead of rediscovering them.
+        - macro_iteration is carried into the trace/log `request_id` context so separate
+          passes are distinguishable when reading logs; it does not gate anything inside
+          this method — the iteration cap (config: pipeline.max_macro_iterations) and the
+          human confirmation both live in the caller (main.py's chat REPL), never here.
 
         Returns a dict including "trace" (a list of per-stage event dicts: role, model,
         attempt, verdict, duration_ms) and "request_id", so a caller embedding this as a
@@ -271,10 +306,23 @@ class Orchestrator:
         """
         request_id = uuid.uuid4().hex[:12]
         trace: List[Dict[str, Any]] = []
-        logger.info("run_complex_task started", extra={"request_id": request_id, "stage": "start"})
+        logger.info(
+            "run_complex_task started (macro_iteration=%d)", macro_iteration,
+            extra={"request_id": request_id, "stage": "start"}
+        )
 
-        # 0. Router: classify and short-circuit simple/error-reaction queries
-        decision = await self._get_router_decision(user_query, request_id, trace)
+        # 0. Router: classify and short-circuit simple/error-reaction queries.
+        # Skipped entirely on a macro-loop re-entry (prior_breakdown given) — we already
+        # know this is a full-pipeline task, and re-classifying risks a fast-path misroute
+        # that would silently discard the whole prior attempt.
+        if prior_breakdown is not None:
+            decision = "COMPLEX_ARCHITECTURE"
+            logger.info(
+                "Macro-loop re-entry: skipping Router, forcing full pipeline",
+                extra={"request_id": request_id, "stage": "routing"}
+            )
+        else:
+            decision = await self._get_router_decision(user_query, request_id, trace)
         if decision in self.FAST_PATH_CATEGORIES:
             logger.info(
                 "Router fast path (%s) — skipping RAG/Architect/Implementer/QA", decision,
@@ -292,8 +340,12 @@ class Orchestrator:
                 "fast_path": True,
                 "qa_approved": None,
                 "qa_feedback": None,
+                "breakdown": None,
+                "closing_report": None,
+                "deviation": None,
                 "request_id": request_id,
                 "trace": trace,
+                "macro_iteration": macro_iteration,
             }
 
         max_iterations = self.config.get('pipeline', {}).get('max_qa_iterations', 2)
@@ -301,15 +353,28 @@ class Orchestrator:
         # 1. Context Retrieval (RAG)
         context = await self._build_rag_context(user_query, request_id)
 
-        # 2. Manager: break the goal into a step outline that guides the Architect
+        # 2. Manager: break the goal into a step outline that guides the Architect.
+        # On a macro-loop re-entry (prior_breakdown given), this call is skipped and the
+        # prior outline is reused as-is — regenerating it here would move the baseline
+        # the second closing report gets measured against, making the two reports
+        # incomparable (see docs/plan-macro-loop-manager-hitl.md, "otras decisiones").
         manager = self.factory.create_role_model("manager")
-        breakdown, entry = await self._call_model(
-            role="manager", stage="task_breakdown", model=manager,
-            prompt=self.prompts.get_manager_breakdown_template(context, user_query),
-            request_id=request_id
-        )
-        trace.append(entry)
+        if prior_breakdown is not None:
+            breakdown = prior_breakdown
+            logger.info(
+                "Macro-loop re-entry: reusing prior breakdown, skipping task_breakdown",
+                extra={"request_id": request_id, "stage": "task_breakdown"}
+            )
+        else:
+            breakdown, entry = await self._call_model(
+                role="manager", stage="task_breakdown", model=manager,
+                prompt=self.prompts.get_manager_breakdown_template(context, user_query),
+                request_id=request_id
+            )
+            trace.append(entry)
         context = f"{context}\n\nTASK BREAKDOWN (Manager):\n{breakdown}"
+        if prior_report is not None:
+            context = f"{context}\n\nPREVIOUS ATTEMPT — MANAGER FINDINGS:\n{prior_report}"
         logger.info(
             "Context assembled (%d chars total, breakdown %d chars)",
             len(context), len(breakdown),
@@ -465,14 +530,53 @@ class Orchestrator:
             )
             trace.append(entry)
 
+        # 5. Manager closing report: compares the final result against the Manager's OWN
+        # original outline (step 2) — nothing else in the pipeline ever revisits it. Gated
+        # by config so its cost (an extra prompt carrying the full plan+implementation) can
+        # be A/B'd against a baseline run with it off. Placed right after the implementation-
+        # check loop deliberately: both `break` paths above just called qa_auditor, and
+        # manager/qa_auditor share a model tag (see config/settings.yaml) — this call finds
+        # its model already loaded under Ollama's single-slot config, so it costs generation
+        # time only, not a model swap.
+        closing_report = None
+        deviation = None
+        if self.config.get('pipeline', {}).get('closing_report', True):
+            max_impl_chars = self.config.get('pipeline', {}).get(
+                'closing_report_max_implementation_chars', 8000
+            )
+            impl_for_report = implementation
+            if len(impl_for_report) > max_impl_chars:
+                impl_for_report = (
+                    impl_for_report[:max_impl_chars]
+                    + "\n\n[... implementation truncated for closing report ...]"
+                )
+            closing_report, entry = await self._call_model(
+                role="manager", stage="closing_report", model=manager,
+                prompt=self.prompts.get_manager_closing_report_template(
+                    user_query, breakdown, plan, impl_for_report
+                ),
+                request_id=request_id, on_chunk=on_chunk
+            )
+            deviation, summary = self._parse_closing_report(closing_report)
+            entry["deviation"] = deviation
+            trace.append(entry)
+            logger.info(
+                "Closing report: deviation=%s", deviation,
+                extra={"request_id": request_id, "stage": "closing_report"}
+            )
+
         return {
             "plan": plan,
             "implementation": implementation,
             "fast_path": False,
             "qa_approved": qa_approved,
             "qa_feedback": qa_feedback,
+            "breakdown": breakdown,
+            "closing_report": closing_report,
+            "deviation": deviation,
             "request_id": request_id,
             "trace": trace,
+            "macro_iteration": macro_iteration,
         }
 
     async def run_simple_query(self, user_query: str) -> str:

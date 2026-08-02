@@ -27,14 +27,20 @@ flowchart TD
 
     IM --> QA2{{"QA Auditor\nimplementation check"}}
     QA2 -->|"needs revision:\nback to the Architect"| AR
-    QA2 -->|"approved"| OUT(["Plan + working code"])
+    QA2 -->|"approved"| CR["Manager\ncloses the loop"]
+
+    CR --> DEV{{"Closing report\ndeviation?"}}
+    DEV -->|"NONE / JUSTIFIED"| OUT(["Plan + working code"])
+    DEV -->|"UNEXPLAINED / UNKNOWN\n(chat only, human confirms)"| RERUN["Full pipeline re-run\nwith the report as feedback"]
+    RERUN --> RAG
 ```
 
-Three things worth noticing in that diagram:
+Four things worth noticing in that diagram:
 
 - **The fast path.** Not every request needs the full pipeline. A router model reads the request first and, for simple questions or "why did this error happen" reactions, the Manager answers immediately — skipping context retrieval, design, and code generation entirely.
 - **The design gate happens before any code is written.** The Architect's plan is reviewed by an independent QA model *before* the Implementer touches it. Catching a bad design assumption on paper is a lot cheaper than catching it in code — and generated code gets a second, separate review of its own.
 - **Implementation feedback goes back through the Architect, not straight to the Implementer.** If the post-implementation review finds a problem, it's treated as a design issue first: the Architect updates the plan, then the Implementer re-writes the code against the revised plan.
+- **The Manager closes its own loop.** After QA approves the implementation, the Manager compares the final result against its own original outline and classifies each step as covered, adapted, dropped, or added. If something was dropped or added without a clear reason, the interactive `chat` session — never the scriptable `ask` command — offers a human-confirmed re-run of the whole pipeline with that report fed back in as feedback, capped at one extra pass by default.
 
 ## The stages
 
@@ -46,6 +52,7 @@ Three things worth noticing in that diagram:
 | **Architect** | Turn the outline into a concrete design (data model, interfaces, error handling, dependencies) | large, reasoning-focused |
 | **Implementer** | Write the actual code from the approved design | large, coding-focused |
 | **QA Auditor** | Review the design *and* the implementation against the original goal, hand back specific feedback | strict, format-disciplined |
+| **Manager (closing report)** | Compare the final result against its own original outline; flag unexplained drops or additions | mid-size, same model as the outline step |
 
 Which real Ollama model tag backs each role is a config choice, not a fixed requirement — see `config/settings.yaml`. Pick whatever fits your GPU; the pipeline shape stays the same.
 
@@ -67,6 +74,8 @@ python main.py chat
 ```
 
 Output streams live as each stage produces it, so you see the Architect's plan and the Implementer's code being written in real time rather than waiting silently for the whole pipeline to finish.
+
+`ask` always runs a single pass and exits — it's the scriptable path and never blocks on input. `chat` is where the human-in-the-loop re-run lives: if the Manager's closing report finds an unexplained deviation, `chat` (and only `chat`) prompts you to confirm one extra full pipeline pass, with the report handed back as feedback. The default answer is no.
 
 ## Status
 
