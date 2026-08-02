@@ -91,9 +91,24 @@ class Orchestrator:
             prompt=prompt, request_id=request_id
         )
         response_upper = response.strip().upper()
-        # Small router models don't always follow "output only the category" strictly,
-        # so match any known category appearing in the response rather than requiring exact equality.
-        decision = next((c for c in self.ROUTER_CATEGORIES if c in response_upper), None)
+        # Small router models don't always follow "output only the category" strictly, so we
+        # can't require exact equality. But we can't just scan for any category either: they
+        # ramble *after* the answer, naming other categories to rule them out ("goes beyond a
+        # SIMPLE_TASK") or echoing the list from the system prompt. Picking the first match in
+        # ROUTER_CATEGORIES declaration order made those replies resolve to SIMPLE_TASK — a
+        # fast-path category — and silently skip RAG/Architect/Implementer/QA entirely.
+        #
+        # They do reliably *lead* with the answer, so a response that starts with a category is
+        # taken as decisive. Anything less clear falls back to whichever category appears
+        # earliest, preferring non-fast-path ones: routing a simple query through the full
+        # pipeline only costs time, while wrongly taking the fast path silently drops the work.
+        decision = next((c for c in self.ROUTER_CATEGORIES if response_upper.startswith(c)), None)
+        if decision is None:
+            hits = sorted(
+                (c in self.FAST_PATH_CATEGORIES, response_upper.find(c), c)
+                for c in self.ROUTER_CATEGORIES if c in response_upper
+            )
+            decision = hits[0][2] if hits else None
         if decision is None:
             logger.warning(
                 "Unrecognized router decision %r — defaulting to COMPLEX_ARCHITECTURE",

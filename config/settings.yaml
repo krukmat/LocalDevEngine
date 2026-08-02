@@ -24,7 +24,14 @@ roles:
     think: false # mismo motivo que architect (también qwen3.6, también thinking-capable)
 
   qa_auditor:
-    model_name: "gemma3:27b"
+    # era gemma3:27b (denso, 17GB): 157.8s en design_gate, el stage mas caro del
+    # pipeline. Este es MoE (~4B activos de 26B) e instruction-tuned, que es lo que
+    # QA necesita para respetar el formato VERDICT/FEEDBACK. Medido en el mismo run:
+    # gemma4 hizo task_breakdown en 22.7s mientras gemma3 tardaba 157.8s.
+    # Comparte tag con el manager: el pipeline baja de 4 modelos distintos a 3, y el
+    # auditor sigue siendo independiente del architect/implementer, que es lo que
+    # importa para que el gate valga algo.
+    model_name: "gemma4:26b-a4b-it-qat"
     capabilities: ["verification", "compliance_check"]
     priority: 5
 
