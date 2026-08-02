@@ -78,7 +78,7 @@ VERDICT: APPROVED or NEEDS_REVISION
 FEEDBACK: <specific, actionable feedback for the Architect to address. If APPROVED, write "None".>"""
 
     @staticmethod
-    def get_qa_review_template(context: str, goal: str, plan: str, implementation: str) -> str:
+    def get_qa_review_template(goal: str, plan: str, implementation: str) -> str:
         """Post-implementation check: QA compares the implementation against the approved plan."""
         return f"""GOAL:\n{goal}\n\nAPPROVED PLAN:\n{plan}\n\nIMPLEMENTATION:\n{implementation}\n\nTASK FOR QA AUDITOR (IMPLEMENTATION CHECK):
 Compare the implementation against the plan and the original goal. Flag any deviation, bug, missing

@@ -302,7 +302,7 @@ class Orchestrator:
         for attempt in range(max_iterations + 1):
             review, qa_entry = await self._call_model(
                 role="qa_auditor", stage="implementation_check", model=qa_auditor,
-                prompt=self.prompts.get_qa_review_template(context, user_query, plan, implementation),
+                prompt=self.prompts.get_qa_review_template(user_query, plan, implementation),
                 request_id=request_id, attempt=attempt + 1
             )
             qa_approved, qa_feedback = self._parse_verdict(review)
