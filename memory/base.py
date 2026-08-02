@@ -8,8 +8,8 @@ class BaseMemory(ABC):
     """
 
     @abstractmethod
-    def add_text(self, text: str, metadata: Dict[str, Any]) -> None:
-        """Embeds and stores a piece of text."""
+    def add_text(self, text: str, metadata: Dict[str, Any], embedding: List[float]) -> None:
+        """Stores a single pre-embedded piece of text."""
         pass
 
     @abstractmethod

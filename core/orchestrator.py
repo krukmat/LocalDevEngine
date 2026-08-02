@@ -38,7 +38,10 @@ class Orchestrator:
 
         timeout = self.config.get('pipeline', {}).get('request_timeout_seconds', 300.0)
         self.factory = ModelFactory(self.config)
-        self.memory = LocalVectorMemory(self.config['storage']['vector_db_path'])
+        self.memory = LocalVectorMemory(
+            self.config['storage']['vector_db_path'],
+            dimension=self.config['embeddings']['dimension'],
+        )
         self.embedder = EmbeddingService(self.config['embeddings']['model_name'], timeout=timeout)
         self.prompts = PromptRegistry()
 
