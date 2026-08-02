@@ -1,6 +1,16 @@
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
 
+
+class ModelCallError(RuntimeError):
+    """Raised when a model call fails (HTTP/transport error) instead of returning
+    the error text as if it were generated content."""
+
+    def __init__(self, message: str, partial: str = ""):
+        super().__init__(message)
+        self.partial = partial
+
+
 class BaseModel(ABC):
     """
     Abstract Base Class for all AI models in the orchestrator.
@@ -23,6 +33,10 @@ class BaseModel(ABC):
         """
         Generates a response based on a prompt and optional context.
         Implements the core interaction with the model.
+
+        Raises:
+            ModelCallError: if the call fails (HTTP/transport error). Never returns
+                the error text as if it were generated content.
         """
         pass
 

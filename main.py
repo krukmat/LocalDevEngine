@@ -9,6 +9,7 @@ try:
     sys.path.append(os.path.abspath(os.path.dirname(__file__)))
     from core.orchestrator import Orchestrator
     from core.ingestor import DataIngestor
+    from models.base import ModelCallError
     import yaml
 except ImportError as e:
     print(f"❌ Error de ruta o carga: {e}")
@@ -74,8 +75,11 @@ class DevOrchestratorCLI:
 
     async def ask_once(self, query: str):
         """Executes a single inquiry and exits."""
-        result = await self.orchestrator.run_complex_task(query)
-        self._print_result(result)
+        try:
+            result = await self.orchestrator.run_complex_task(query)
+            self._print_result(result)
+        except ModelCallError as e:
+            print(f"{Colors.RED}❌ Fallo llamando al modelo: {e}{Colors.ENDC}")
 
     async def interactive_shell(self):
         """The REPL (Read-Eval-Print Loop) mode for deep work sessions."""

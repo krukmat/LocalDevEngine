@@ -1,7 +1,7 @@
 import httpx
 import json
 from typing import Dict, Any, Optional
-from models.base import BaseModel
+from models.base import BaseModel, ModelCallError
 
 class OllamaModel(BaseModel):
     """
@@ -50,7 +50,10 @@ class OllamaModel(BaseModel):
                 response.raise_for_status()
                 return response.json().get("response", "")
             except httpx.HTTPError as e:
-                return f"Error calling Ollama API: {str(e) or type(e).__name__}"
+                # Never return the error as if it were generated content — a caller
+                # (e.g. QA auditing the "plan") must not be able to mistake a failed
+                # call for real output.
+                raise ModelCallError(str(e) or type(e).__name__) from e
 
     async def load(self):
         """

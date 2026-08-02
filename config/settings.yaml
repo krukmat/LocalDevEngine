@@ -12,7 +12,7 @@ roles:
     priority: 2
 
   architect:
-    model_name: "qwen3.6:27b-q4_K_M" # Coincide con el tag real en `ollama list`
+    model_name: "qwen3.6:35b-a3b" # era qwen3.6:27b-q4_K_M (denso): 3/3 timeouts a 300s; este MoE completó el implementer en 123.1s
     capabilities: ["design", "reasoning"]
     priority: 3
     think: false # qwen3.6 es "thinking"-capable; el chain-of-thought completo excedía 300s por llamada
