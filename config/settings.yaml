@@ -1,0 +1,46 @@
+# config/settings.yaml
+
+roles:
+  router:
+    model_name: "phi3:mini" # Coincide con el tag real en `ollama list`
+    capabilities: ["routing", "filtering"]
+    priority: 1
+
+  manager:
+    model_name: "gemma4:26b-a4b-it-qat"
+    capabilities: ["orchestration", "task_management"]
+    priority: 2
+
+  architect:
+    model_name: "qwen3.6:27b-q4_K_M" # Coincide con el tag real en `ollama list`
+    capabilities: ["design", "reasoning"]
+    priority: 3
+    think: false # qwen3.6 es "thinking"-capable; el chain-of-thought completo excedía 300s por llamada
+
+  implementer:
+    model_name: "qwen3.6:35b-a3b"
+    capabilities: ["coding", "implementation"]
+    priority: 4
+    think: false # mismo motivo que architect (también qwen3.6, también thinking-capable)
+
+  qa_auditor:
+    model_name: "gemma3:27b"
+    capabilities: ["verification", "compliance_check"]
+    priority: 5
+
+  copilot:
+    model_name: "granite-code:8b"
+    capabilities: ["autocomplete", "syntax"]
+    priority: 6
+
+embeddings:
+  model_name: "nomic-embed-text:latest"
+  dimension: 768 # Según metadata de ollama para nomic-embed-text
+
+storage:
+  vector_db_path: "./memory/.vector_store"
+  index_dir: "./memory/index"
+
+pipeline:
+  max_qa_iterations: 2 # Reintentos de QA -> rediseño antes de rendirse
+  request_timeout_seconds: 300 # Modelos "thinking" (qwen3.6) + swap en frío pueden tardar minutos
