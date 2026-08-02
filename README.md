@@ -61,7 +61,7 @@ Which real Ollama model tag backs each role is a config choice, not a fixed requ
 ### 1. Prerequisites
 
 - Python 3.10+
-- A local [Ollama](https://ollama.com) server (`ollama serve`), reachable at `http://localhost:11434` (hardcoded default — see [config/settings.yaml](config/settings.yaml))
+- A local [Ollama](https://ollama.com) server (`ollama serve`), reachable at `http://localhost:11434` by default — override with the `LDE_OLLAMA_HOST` env var (e.g. `LDE_OLLAMA_HOST=http://localhost:11435/api`) if you're pointing at a different host or port
 - Enough VRAM for whichever model is currently loaded — Ollama swaps models on demand, it doesn't need all of them resident at once
 
 ### 2. Install
@@ -105,6 +105,31 @@ python main.py chat
 Output streams live as each stage produces it, so you see the Architect's plan and the Implementer's code being written in real time rather than waiting silently for the whole pipeline to finish.
 
 `ask` always runs a single pass and exits — it's the scriptable path and never blocks on input. `chat` is where the human-in-the-loop re-run lives: if the Manager's closing report finds an unexplained deviation, `chat` (and only `chat`) prompts you to confirm one extra full pipeline pass, with the report handed back as feedback. The default answer is no.
+
+### 5. Driving it from another program
+
+`ask` also works as a non-interactive backend for another process (e.g. a CI job or another tool that delegates coding tasks to it):
+
+```bash
+# JSON receipt on stdout, live model stream redirected to stderr
+python main.py ask --json "add rate limiting to the API layer"
+
+# Write the receipt straight to a file instead
+python main.py ask --json --out receipt.json "add rate limiting to the API layer"
+
+# Suppress the live stream entirely
+python main.py ask --json --quiet "add rate limiting to the API layer"
+
+# Read the query from a file or stdin instead of argv
+python main.py ask --json --input-file task.txt
+cat task.txt | python main.py ask --json
+
+# Force the Implementer/QA to follow a strict, machine-parseable file-block
+# grammar instead of free prose (currently one profile: fenix-tagged-file)
+python main.py ask --json --output-contract fenix-tagged-file "add rate limiting to the API layer"
+```
+
+Every call — including a failed or timed-out one — returns a JSON **receipt**: `status` (`completed`/`failed`/`timeout`), the query and its hash, timing, a `config_fingerprint` snapshot of the models/limits actually used, a per-stage `outcome` (did RAG run and find anything, did the design gate need revisions, was the implementation approved, what did the closing report conclude), and the full `trace`. Exit codes carry transport-level meaning only: **0** = the pipeline ran and produced a receipt (regardless of whether QA approved or a deviation was flagged — that's in the receipt, not the exit code), **2** = the engine itself failed or hit `pipeline.max_run_seconds` (still returns a partial receipt), **3** = usage error (bad flags, unknown command). The receipt is self-reported by the same code it describes, so treat it as a lead to verify, not proof — see [CLAUDE.md](CLAUDE.md)'s "The receipt" section for the full shape and caveats.
 
 ## Status
 
