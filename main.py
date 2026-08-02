@@ -61,14 +61,19 @@ class DevOrchestratorCLI:
         )
         await ingestor.ingest_directory(directory)
 
-    def _print_result(self, result: dict):
-        """Displays a run_complex_task result, handling both the Router fast path and the full pipeline."""
+    def _print_result(self, result: dict, streamed: bool = False):
+        """Displays a run_complex_task result, handling both the Router fast path and the
+        full pipeline. When streamed=True, plan/implementation text was already printed
+        live via _on_chunk as it generated, so only the summary banners are shown here —
+        printing them again would duplicate the whole response."""
         if result.get("fast_path"):
-            print(f"\n{Colors.GREEN}--- RESPUESTA RÁPIDA (Router) ---{Colors.ENDC}\n{result['implementation']}")
+            if not streamed:
+                print(f"\n{Colors.GREEN}--- RESPUESTA RÁPIDA (Router) ---{Colors.ENDC}\n{result['implementation']}")
             return
 
-        print(f"\n{Colors.GREEN}--- PLAN DEL ARQUITECTO ---{Colors.ENDC}\n{result['plan']}")
-        print(f"{Colors.BLUE}--- IMPLEMENTACIÓN SENIOR ---{Colors.ENDC}\n{result['implementation']}")
+        if not streamed:
+            print(f"\n{Colors.GREEN}--- PLAN DEL ARQUITECTO ---{Colors.ENDC}\n{result['plan']}")
+            print(f"{Colors.BLUE}--- IMPLEMENTACIÓN SENIOR ---{Colors.ENDC}\n{result['implementation']}")
 
         if result.get("qa_approved"):
             print(f"{Colors.GREEN}--- QA: APROBADO ---{Colors.ENDC}")
@@ -78,11 +83,38 @@ class DevOrchestratorCLI:
             if result.get("qa_feedback"):
                 print(result["qa_feedback"])
 
+    def _make_stage_printer(self):
+        """Builds an on_chunk callback that prints a stage header (colored, once) the
+        first time each stage streams, then streams its text live. Stages repeat across
+        revision attempts (e.g. design_revision may run 0-2 times), so headers must be
+        keyed by (stage, attempt), not by stage alone."""
+        seen_headers = set()
+        current = {"key": None}
+        labels = {
+            "fast_path": (Colors.GREEN, "RESPUESTA RÁPIDA (Router)"),
+            "design_plan": (Colors.GREEN, "PLAN DEL ARQUITECTO"),
+            "design_revision": (Colors.YELLOW, "REVISIÓN DEL PLAN"),
+            "implementation": (Colors.BLUE, "IMPLEMENTACIÓN SENIOR"),
+        }
+
+        def on_chunk(text: str, stage: str, attempt: Optional[int]):
+            key = (stage, attempt)
+            if key != current["key"]:
+                current["key"] = key
+                color, label = labels.get(stage, (Colors.CYAN, stage.upper()))
+                if key not in seen_headers:
+                    seen_headers.add(key)
+                    print(f"\n{color}--- {label} ---{Colors.ENDC}")
+            print(text, end="", flush=True)
+
+        return on_chunk
+
     async def ask_once(self, query: str):
         """Executes a single inquiry and exits."""
         try:
-            result = await self.orchestrator.run_complex_task(query)
-            self._print_result(result)
+            result = await self.orchestrator.run_complex_task(query, on_chunk=self._make_stage_printer())
+            print()  # close the last streamed line before the summary banners
+            self._print_result(result, streamed=True)
         except ModelCallError as e:
             print(f"{Colors.RED}❌ Fallo llamando al modelo: {e}{Colors.ENDC}")
 
@@ -117,8 +149,9 @@ class DevOrchestratorCLI:
                     os.system('cls' if os.name == 'nt' else 'clear')
                 else:
                     # Si el usuario solo mete texto, lo trata como una pregunta directa al pipeline
-                    result = await self.orchestrator.run_complex_task(user_input)
-                    self._print_result(result)
+                    result = await self.orchestrator.run_complex_task(user_input, on_chunk=self._make_stage_printer())
+                    print()
+                    self._print_result(result, streamed=True)
 
             except KeyboardInterrupt:
                 print("\n\nInterrupción detectada. Saliendo...")

@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional
+from typing import AsyncIterator, Dict, Any, Optional
 
 
 class ModelCallError(RuntimeError):
@@ -37,6 +37,20 @@ class BaseModel(ABC):
         Raises:
             ModelCallError: if the call fails (HTTP/transport error). Never returns
                 the error text as if it were generated content.
+        """
+        pass
+
+    @abstractmethod
+    def generate_stream(self, prompt: str, context: Optional[Dict[str, Any]] = None) -> AsyncIterator[str]:
+        """
+        Same call as generate(), but yields response text incrementally as it's
+        produced instead of waiting for the full completion. Callers that need the
+        full text (e.g. the orchestrator feeding one stage's output into the next
+        stage's prompt) should join the yielded chunks themselves.
+
+        Raises:
+            ModelCallError: if the call fails (HTTP/transport error), raised from
+                inside the async generator at the point the failure occurs.
         """
         pass
 

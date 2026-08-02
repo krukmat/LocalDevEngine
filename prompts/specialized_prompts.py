@@ -47,11 +47,19 @@ class PromptRegistry:
         }
         return prompts.get(role, "You are a helpful coding assistant.")
 
+    SECTION_NAMES = ("Data Model", "API/Interface", "Error Handling", "Dependencies/Integration")
+
     @staticmethod
     def get_architect_thinking_template(context: str, goal: str) -> str:
         """Provides a template for deep reasoning (Thinking Mode)."""
-        return f"""CONTEXT FROM PROJECT:\n{context}\n\nGOAL:\n{goal}\n\nTASK FOR ARCHITECT:\nAnalyze the logic and provide a structural plan. 
-Consider edge cases, error handling, and dependency impacts before providing a final design."""
+        section_headers = "\n".join(f"## {name}" for name in PromptRegistry.SECTION_NAMES)
+        return f"""CONTEXT FROM PROJECT:\n{context}\n\nGOAL:\n{goal}\n\nTASK FOR ARCHITECT:\nAnalyze the logic and provide a structural plan.
+Consider edge cases, error handling, and dependency impacts before providing a final design.
+
+Structure your plan using EXACTLY these four section headers, in this order, each on its own line:
+{section_headers}
+Every section must be present even if brief (e.g. "N/A — no external dependencies."). Do not add,
+remove, rename, or reorder sections — the headers are parsed verbatim by the review pipeline."""
 
     @staticmethod
     def get_implementer_task_template(plan: str, context: str) -> str:
@@ -76,6 +84,29 @@ edge cases and dependency impacts, and doesn't introduce obvious architectural p
 Respond in EXACTLY this format:
 VERDICT: APPROVED or NEEDS_REVISION
 FEEDBACK: <specific, actionable feedback for the Architect to address. If APPROVED, write "None".>"""
+
+    @staticmethod
+    def get_section_review_template(context: str, goal: str, section_name: str, section_text: str, full_plan: str) -> str:
+        """Design gate, scoped to one plan section. The rest of the plan is included for
+        cross-section consistency (e.g. the API section must match the Data Model section),
+        but the verdict/feedback must be about section_name only — approving other sections
+        or flagging issues outside this section belongs to their own review pass."""
+        return f"""GOAL:\n{goal}\n\nPROJECT CONTEXT:\n{context}\n\nFULL PLAN (for cross-section consistency only):\n{full_plan}\n\nSECTION UNDER REVIEW — "{section_name}":\n{section_text}\n\nTASK FOR QA AUDITOR (DESIGN GATE — SINGLE SECTION):
+Review ONLY the "{section_name}" section above BEFORE any code is written. Check that it fully
+addresses its part of the goal, is consistent with the other sections shown, accounts for edge
+cases, and doesn't introduce obvious architectural problems. Do not comment on other sections.
+
+Respond in EXACTLY this format:
+VERDICT: APPROVED or NEEDS_REVISION
+FEEDBACK: <specific, actionable feedback for the Architect to address in THIS section only. If APPROVED, write "None".>"""
+
+    @staticmethod
+    def get_section_revision_template(context: str, goal: str, section_name: str, previous_section: str, feedback: str, full_plan: str) -> str:
+        """Regenerates a single rejected section, keeping the rest of the plan as fixed
+        context so the revision stays consistent with sections that already passed."""
+        return f"""GOAL:\n{goal}\n\nPROJECT CONTEXT:\n{context}\n\nFULL PLAN (other sections are already approved — stay consistent with them):\n{full_plan}\n\nPREVIOUS "{section_name}" SECTION:\n{previous_section}\n\nQA FEEDBACK ON THIS SECTION:\n{feedback}\n\nTASK FOR ARCHITECT:
+Revise ONLY the "{section_name}" section to address the QA feedback above. Output just the revised
+section body — do not repeat the "## {section_name}" header, do not output other sections."""
 
     @staticmethod
     def get_qa_review_template(goal: str, plan: str, implementation: str) -> str:

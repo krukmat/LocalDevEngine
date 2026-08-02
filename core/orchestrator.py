@@ -3,7 +3,7 @@ import logging
 import re
 import time
 import uuid
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Callable, Optional, List, Dict, Any, Tuple
 import yaml
 import os
 
@@ -14,6 +14,44 @@ from prompts.specialized_prompts import PromptRegistry
 
 _VERDICT_RE = re.compile(r"VERDICT:\s*(APPROVED|NEEDS_REVISION)", re.IGNORECASE)
 _FEEDBACK_RE = re.compile(r"FEEDBACK:\s*(.*)", re.IGNORECASE | re.DOTALL)
+
+
+def _split_plan_sections(plan: str, section_names: Tuple[str, ...]) -> Optional["Dict[str, str]"]:
+    """
+    Splits an Architect plan into named sections on "## <name>" headers.
+    Returns an ordered dict of {section_name: body} only if ALL of section_names
+    are found as headers (in any order, no duplicates) — otherwise returns None,
+    which callers must treat as "model didn't follow the format" and fall back
+    to treating the plan as a single monolithic block. Small/mid models don't
+    reliably follow formatting instructions (see the router's classification
+    non-determinism), so this can never be the only path.
+    """
+    header_re = re.compile(
+        r"^##\s*(" + "|".join(re.escape(n) for n in section_names) + r")\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    matches = list(header_re.finditer(plan))
+    if len(matches) != len(section_names):
+        return None
+    found_names = {m.group(1).strip() for m in matches}
+    canonical = {n.lower(): n for n in section_names}
+    if {n.lower() for n in found_names} != set(canonical.keys()):
+        return None
+
+    sections: Dict[str, str] = {}
+    for i, m in enumerate(matches):
+        name = canonical[m.group(1).strip().lower()]
+        body_start = m.end()
+        body_end = matches[i + 1].start() if i + 1 < len(matches) else len(plan)
+        if name in sections:
+            return None  # duplicate header — ambiguous, bail to monolithic fallback
+        sections[name] = plan[body_start:body_end].strip()
+    return sections
+
+
+def _join_plan_sections(sections: Dict[str, str], section_names: Tuple[str, ...]) -> str:
+    """Reassembles a sections dict back into the same '## Name' plan text format."""
+    return "\n\n".join(f"## {name}\n{sections[name]}" for name in section_names)
 
 # Library convention: get a module logger and emit to it, but never call
 # logging.basicConfig() or attach handlers here. Configuring handlers/levels
@@ -53,19 +91,38 @@ class Orchestrator:
         model,
         prompt: str,
         request_id: str,
-        attempt: Optional[int] = None
+        attempt: Optional[int] = None,
+        on_chunk: Optional[Callable[[str, str, Optional[int]], None]] = None,
     ) -> Tuple[str, Dict[str, Any]]:
         """
         Calls a role model with its system prompt, logs the call, and returns
         (response, trace_entry). trace_entry is a plain dict the caller owns —
         it is never stored on `self`, so concurrent run_complex_task() calls on
         the same Orchestrator instance never share mutable state.
+
+        If on_chunk is given, streams the call via model.generate_stream() and
+        invokes on_chunk(text, stage, attempt) per fragment as it arrives — stage
+        and attempt let the caller (e.g. the CLI) print a header once per distinct
+        stage/attempt instead of one flat unlabeled stream. The full response is
+        still assembled and returned exactly as generate() would, since callers
+        feed it into later stages. Without on_chunk, behavior is unchanged
+        (single non-streamed call).
         """
         start = time.monotonic()
-        response = await model.generate(
-            prompt,
-            context={"system_prompt": self.prompts.get_system_prompt(role)}
-        )
+        if on_chunk is not None:
+            parts = []
+            async for text in model.generate_stream(
+                prompt,
+                context={"system_prompt": self.prompts.get_system_prompt(role)}
+            ):
+                parts.append(text)
+                on_chunk(text, stage, attempt)
+            response = "".join(parts)
+        else:
+            response = await model.generate(
+                prompt,
+                context={"system_prompt": self.prompts.get_system_prompt(role)}
+            )
         duration_ms = (time.monotonic() - start) * 1000
 
         entry = {
@@ -192,10 +249,21 @@ class Orchestrator:
         approved = bool(verdict_match) and verdict_match.group(1).upper() == "APPROVED"
         return approved, feedback
 
-    async def run_complex_task(self, user_query: str) -> Dict[str, Any]:
+    async def run_complex_task(
+        self,
+        user_query: str,
+        on_chunk: Optional[Callable[[str, str, Optional[int]], None]] = None,
+    ) -> Dict[str, Any]:
         """
         Main workflow: Router -> (fast path | RAG -> Manager -> Architect<->QA design gate
         -> Implementer<->QA implementation check).
+
+        If on_chunk is given, it's invoked as on_chunk(text, stage, attempt) with text
+        fragments as they stream in from the model, for every stage whose output is
+        shown to the user directly (fast-path answer, design plan/revision,
+        implementation) — not QA stages, whose raw text is never printed, only their
+        parsed verdict/feedback. Useful for a CLI/UI to show live progress instead of
+        a multi-minute silent wait per stage.
 
         Returns a dict including "trace" (a list of per-stage event dicts: role, model,
         attempt, verdict, duration_ms) and "request_id", so a caller embedding this as a
@@ -215,7 +283,7 @@ class Orchestrator:
             manager = self.factory.create_role_model("manager")
             answer, entry = await self._call_model(
                 role="manager", stage="fast_path", model=manager,
-                prompt=user_query, request_id=request_id
+                prompt=user_query, request_id=request_id, on_chunk=on_chunk
             )
             trace.append(entry)
             return {
@@ -255,37 +323,99 @@ class Orchestrator:
         plan, entry = await self._call_model(
             role="architect", stage="design_plan", model=architect,
             prompt=self.prompts.get_architect_thinking_template(context, user_query),
-            request_id=request_id, attempt=1
+            request_id=request_id, attempt=1, on_chunk=on_chunk
         )
         trace.append(entry)
 
-        for attempt in range(max_iterations + 1):
-            review, qa_entry = await self._call_model(
-                role="qa_auditor", stage="design_gate", model=qa_auditor,
-                prompt=self.prompts.get_design_review_template(context, user_query, plan),
-                request_id=request_id, attempt=attempt + 1
-            )
-            design_approved, design_feedback = self._parse_verdict(review)
-            qa_entry["verdict"] = "APPROVED" if design_approved else "NEEDS_REVISION"
-            trace.append(qa_entry)
+        section_names = self.prompts.SECTION_NAMES
+        sections = _split_plan_sections(plan, section_names)
+        if sections is not None:
+            # Sectioned design gate: each section is reviewed and — if rejected —
+            # regenerated independently, instead of regenerating the whole plan for
+            # a defect in one part of it. Falls back to the monolithic gate below
+            # if the Architect ever stops following the "## Section" format (e.g.
+            # on a revision reply), so a formatting slip can't strand the pipeline.
             logger.info(
-                "Design gate attempt %d: %s", attempt + 1, qa_entry["verdict"],
-                extra={"request_id": request_id, "stage": "design_gate", "attempt": attempt + 1}
+                "Design gate: sectioned review (%d sections)", len(sections),
+                extra={"request_id": request_id, "stage": "design_gate"}
             )
-            if design_approved:
-                break
-            if attempt == max_iterations:
-                logger.warning(
-                    "Design gate not approved after %d revisions — proceeding with last plan",
-                    max_iterations, extra={"request_id": request_id, "stage": "design_gate"}
+            all_approved = True
+            for section_name in section_names:
+                section_text = sections[section_name]
+                section_approved = False
+                for attempt in range(max_iterations + 1):
+                    full_plan = _join_plan_sections(sections, section_names)
+                    review, qa_entry = await self._call_model(
+                        role="qa_auditor", stage="design_gate", model=qa_auditor,
+                        prompt=self.prompts.get_section_review_template(
+                            context, user_query, section_name, section_text, full_plan
+                        ),
+                        request_id=request_id, attempt=attempt + 1
+                    )
+                    section_approved, section_feedback = self._parse_verdict(review)
+                    qa_entry["verdict"] = "APPROVED" if section_approved else "NEEDS_REVISION"
+                    qa_entry["section"] = section_name
+                    trace.append(qa_entry)
+                    logger.info(
+                        "Design gate [%s] attempt %d: %s", section_name, attempt + 1, qa_entry["verdict"],
+                        extra={"request_id": request_id, "stage": "design_gate", "attempt": attempt + 1}
+                    )
+                    if section_approved:
+                        break
+                    if attempt == max_iterations:
+                        logger.warning(
+                            "Design gate [%s] not approved after %d revisions — keeping last version",
+                            section_name, max_iterations,
+                            extra={"request_id": request_id, "stage": "design_gate"}
+                        )
+                        break
+                    section_text, entry = await self._call_model(
+                        role="architect", stage="design_revision", model=architect,
+                        prompt=self.prompts.get_section_revision_template(
+                            context, user_query, section_name, section_text, section_feedback, full_plan
+                        ),
+                        request_id=request_id, attempt=attempt + 2, on_chunk=on_chunk
+                    )
+                    trace.append(entry)
+                    sections[section_name] = section_text
+                all_approved = all_approved and section_approved
+            plan = _join_plan_sections(sections, section_names)
+            logger.info(
+                "Design gate sectioned result: %s", "APPROVED" if all_approved else "NEEDS_REVISION (partial)",
+                extra={"request_id": request_id, "stage": "design_gate"}
+            )
+        else:
+            logger.info(
+                "Design gate: Architect didn't follow the section format — falling back to monolithic review",
+                extra={"request_id": request_id, "stage": "design_gate"}
+            )
+            for attempt in range(max_iterations + 1):
+                review, qa_entry = await self._call_model(
+                    role="qa_auditor", stage="design_gate", model=qa_auditor,
+                    prompt=self.prompts.get_design_review_template(context, user_query, plan),
+                    request_id=request_id, attempt=attempt + 1
                 )
-                break
-            plan, entry = await self._call_model(
-                role="architect", stage="design_revision", model=architect,
-                prompt=self.prompts.get_architect_revision_template(context, user_query, plan, design_feedback),
-                request_id=request_id, attempt=attempt + 2
-            )
-            trace.append(entry)
+                design_approved, design_feedback = self._parse_verdict(review)
+                qa_entry["verdict"] = "APPROVED" if design_approved else "NEEDS_REVISION"
+                trace.append(qa_entry)
+                logger.info(
+                    "Design gate attempt %d: %s", attempt + 1, qa_entry["verdict"],
+                    extra={"request_id": request_id, "stage": "design_gate", "attempt": attempt + 1}
+                )
+                if design_approved:
+                    break
+                if attempt == max_iterations:
+                    logger.warning(
+                        "Design gate not approved after %d revisions — proceeding with last plan",
+                        max_iterations, extra={"request_id": request_id, "stage": "design_gate"}
+                    )
+                    break
+                plan, entry = await self._call_model(
+                    role="architect", stage="design_revision", model=architect,
+                    prompt=self.prompts.get_architect_revision_template(context, user_query, plan, design_feedback),
+                    request_id=request_id, attempt=attempt + 2, on_chunk=on_chunk
+                )
+                trace.append(entry)
 
         # 4. Implementation Phase with post-implementation QA check
         implementer = self.factory.create_role_model("implementer")
@@ -293,7 +423,7 @@ class Orchestrator:
         implementation, entry = await self._call_model(
             role="implementer", stage="implementation", model=implementer,
             prompt=self.prompts.get_implementer_task_template(plan, context),
-            request_id=request_id, attempt=1
+            request_id=request_id, attempt=1, on_chunk=on_chunk
         )
         trace.append(entry)
 
@@ -325,13 +455,13 @@ class Orchestrator:
             plan, entry = await self._call_model(
                 role="architect", stage="design_revision", model=architect,
                 prompt=self.prompts.get_architect_revision_template(context, user_query, plan, qa_feedback),
-                request_id=request_id, attempt=attempt + 2
+                request_id=request_id, attempt=attempt + 2, on_chunk=on_chunk
             )
             trace.append(entry)
             implementation, entry = await self._call_model(
                 role="implementer", stage="implementation", model=implementer,
                 prompt=self.prompts.get_implementer_task_template(plan, context),
-                request_id=request_id, attempt=attempt + 2
+                request_id=request_id, attempt=attempt + 2, on_chunk=on_chunk
             )
             trace.append(entry)
 

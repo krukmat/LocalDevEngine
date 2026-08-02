@@ -1,6 +1,6 @@
 import httpx
 import json
-from typing import Dict, Any, Optional
+from typing import AsyncIterator, Dict, Any, Optional
 from models.base import BaseModel, ModelCallError
 
 class OllamaModel(BaseModel):
@@ -53,6 +53,39 @@ class OllamaModel(BaseModel):
                 # Never return the error as if it were generated content — a caller
                 # (e.g. QA auditing the "plan") must not be able to mistake a failed
                 # call for real output.
+                raise ModelCallError(str(e) or type(e).__name__) from e
+
+    async def generate_stream(self, prompt: str, context: Optional[Dict[str, Any]] = None) -> AsyncIterator[str]:
+        """
+        Streams the Ollama generation endpoint via NDJSON (stream: true). Each line
+        is a JSON object with a "response" fragment and a "done" flag; the last line
+        also carries the same fields /api/generate returns non-streamed, but we only
+        need "response" and "done" here.
+        """
+        payload = {
+            "model": self.name,
+            "prompt": prompt,
+            "stream": True,
+        }
+        if context and "system_prompt" in context:
+            payload["system"] = context["system_prompt"]
+        if self.think is not None:
+            payload["think"] = self.think
+
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            try:
+                async with client.stream("POST", f"{self.api_url}/generate", json=payload, timeout=self.timeout) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line.strip():
+                            continue
+                        chunk = json.loads(line)
+                        text = chunk.get("response", "")
+                        if text:
+                            yield text
+                        if chunk.get("done"):
+                            break
+            except httpx.HTTPError as e:
                 raise ModelCallError(str(e) or type(e).__name__) from e
 
     async def load(self):
