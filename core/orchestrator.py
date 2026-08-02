@@ -7,10 +7,12 @@ from typing import Callable, Optional, List, Dict, Any, Tuple
 import yaml
 import os
 
+from models.base import ModelCallError
 from models.factory import ModelFactory
 from memory.embeddings import EmbeddingService, EmbeddingTooLargeError
 from memory.local_memory import LocalVectorMemory
 from prompts.specialized_prompts import PromptRegistry
+from core import receipt as receipt_mod
 
 _VERDICT_RE = re.compile(r"VERDICT:\s*(APPROVED|NEEDS_REVISION)", re.IGNORECASE)
 _FEEDBACK_RE = re.compile(r"FEEDBACK:\s*(.*)", re.IGNORECASE | re.DOTALL)
@@ -77,13 +79,31 @@ class Orchestrator:
             self.config = yaml.safe_load(f)
 
         timeout = self.config.get('pipeline', {}).get('request_timeout_seconds', 300.0)
-        self.factory = ModelFactory(self.config)
+        # LDE_OLLAMA_HOST lets a caller running its own Ollama on a non-default host/port
+        # (e.g. fenix, see docs/plan-mitigation-fenix-outsourcing-controls.md paso A7)
+        # override the hardcoded localhost default without editing settings.yaml.
+        api_url = os.environ.get("LDE_OLLAMA_HOST", "http://localhost:11434/api")
+        self.factory = ModelFactory(self.config, api_url=api_url)
         self.memory = LocalVectorMemory(
             self.config['storage']['vector_db_path'],
             dimension=self.config['embeddings']['dimension'],
         )
-        self.embedder = EmbeddingService(self.config['embeddings']['model_name'], timeout=timeout)
+        self.embedder = EmbeddingService(
+            self.config['embeddings']['model_name'], api_url=api_url, timeout=timeout
+        )
         self.prompts = PromptRegistry()
+
+    async def aclose(self) -> None:
+        """Releases resources held by the Orchestrator (currently: the embedder's HTTP
+        client). A caller embedding this as a library should use this or the async
+        context manager instead of reaching into self.embedder directly."""
+        await self.embedder.aclose()
+
+    async def __aenter__(self) -> "Orchestrator":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.aclose()
 
     async def _call_model(
         self,
@@ -182,7 +202,7 @@ class Orchestrator:
         logger.info("Router decision: %s", decision, extra={"request_id": request_id, "stage": "routing"})
         return decision
 
-    async def _build_rag_context(self, user_query: str, request_id: str) -> str:
+    async def _build_rag_context(self, user_query: str, request_id: str) -> Tuple[str, Dict[str, Any]]:
         """
         Retrieves relevant chunks, caps how many come from any single source
         (so one file can't consume the whole top_k), attributes each with
@@ -190,6 +210,10 @@ class Orchestrator:
         chunks_retrieved/chunks_used/context_chars and every score, since
         that's the only way to tell whether a NEEDS_REVISION came from the
         plan or from noisy RAG context.
+
+        Returns (context, stats) — stats feeds the receipt's outcome.rag block
+        (docs/plan-receipt-interface-callers.md hallazgo #2) so "wrote blind"
+        is a signal a caller can check without parsing logs.
         """
         retrieval_cfg = self.config.get('retrieval', {})
         top_k = retrieval_cfg.get('top_k', 5)
@@ -232,13 +256,22 @@ class Orchestrator:
         if not context:
             context = "No existing local context found."
 
+        scores = [round(c.get("score", 0), 3) for c in relevant_chunks]
+        sources = sorted({c.get("source", "?") for c in used_chunks})
         logger.info(
             "RAG: chunks_retrieved=%d chunks_used=%d context_chars=%d scores=%s",
-            len(relevant_chunks), len(parts), context_chars,
-            [round(c.get("score", 0), 3) for c in relevant_chunks],
+            len(relevant_chunks), len(parts), context_chars, scores,
             extra={"request_id": request_id, "stage": "rag"}
         )
-        return context
+        stats = {
+            "ran": True,
+            "chunks_retrieved": len(relevant_chunks),
+            "chunks_used": len(parts),
+            "context_chars": context_chars,
+            "scores": scores,
+            "sources": sources,
+        }
+        return context, stats
 
     def _parse_verdict(self, qa_response: str) -> Tuple[bool, str]:
         """
@@ -273,6 +306,7 @@ class Orchestrator:
         prior_breakdown: Optional[str] = None,
         prior_report: Optional[str] = None,
         macro_iteration: int = 1,
+        output_contract: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Main workflow: Router -> (fast path | RAG -> Manager -> Architect<->QA design gate
@@ -299,18 +333,113 @@ class Orchestrator:
           passes are distinguishable when reading logs; it does not gate anything inside
           this method — the iteration cap (config: pipeline.max_macro_iterations) and the
           human confirmation both live in the caller (main.py's chat REPL), never here.
+        - output_contract, if set to one of PromptRegistry.OUTPUT_CONTRACTS (currently only
+          "fenix-tagged-file"), teaches the Implementer and the implementation-check QA a
+          strict machine-parseable grammar instead of free prose, and makes QA reject
+          grammar violations regardless of code correctness (see
+          docs/plan-mitigation-fenix-outsourcing-controls.md, paso A3).
 
-        Returns a dict including "trace" (a list of per-stage event dicts: role, model,
-        attempt, verdict, duration_ms) and "request_id", so a caller embedding this as a
-        library gets a full structured audit record without parsing any logs.
+        Returns a receipt dict (see core/receipt.py / docs/plan-receipt-interface-callers.md):
+        schema_version, request_id, status ("completed"|"failed"|"timeout"), query,
+        query_sha256, timestamps, duration_ms, outcome (per-stage ran/results incl. rag,
+        design_gate, implementation_check, closing_report), config_fingerprint, artifacts
+        (plan/implementation/breakdown/closing_report text), trace, error. The legacy
+        top-level keys (plan, implementation, fast_path, qa_approved, qa_feedback,
+        breakdown, closing_report, deviation, request_id, trace, macro_iteration) are kept
+        for compatibility with existing internal consumers (main.py's _print_result /
+        _macro_rerun_available) — the receipt adds structure, it doesn't remove the old shape.
         """
+        started_at = receipt_mod.now()
         request_id = uuid.uuid4().hex[:12]
         trace: List[Dict[str, Any]] = []
+        max_run_seconds = self.config.get('pipeline', {}).get('max_run_seconds')
+
         logger.info(
             "run_complex_task started (macro_iteration=%d)", macro_iteration,
             extra={"request_id": request_id, "stage": "start"}
         )
 
+        try:
+            if max_run_seconds:
+                body = await asyncio.wait_for(
+                    self._run_pipeline_body(
+                        user_query, request_id, trace, on_chunk,
+                        prior_breakdown, prior_report, macro_iteration, output_contract,
+                    ),
+                    timeout=max_run_seconds,
+                )
+            else:
+                body = await self._run_pipeline_body(
+                    user_query, request_id, trace, on_chunk,
+                    prior_breakdown, prior_report, macro_iteration, output_contract,
+                )
+        except asyncio.TimeoutError:
+            finished_at = receipt_mod.now()
+            logger.error(
+                "run_complex_task timed out after %ss", max_run_seconds,
+                extra={"request_id": request_id, "stage": "timeout"}
+            )
+            last_entry = trace[-1] if trace else {}
+            rec = receipt_mod.build_receipt(
+                status="timeout", query=user_query, started_at=started_at, finished_at=finished_at,
+                config=self.config, request_id=request_id, trace=trace, macro_iteration=macro_iteration,
+                error={"stage": last_entry.get("stage"), "role": last_entry.get("role"),
+                       "model": last_entry.get("model"),
+                       "message": f"Pipeline exceeded max_run_seconds={max_run_seconds}"},
+            )
+            rec.update({
+                "plan": None, "implementation": None, "fast_path": False,
+                "qa_approved": None, "qa_feedback": None, "breakdown": None,
+                "closing_report": None, "deviation": None, "macro_iteration": macro_iteration,
+            })
+            return rec
+        except ModelCallError as e:
+            finished_at = receipt_mod.now()
+            failed_entry = trace[-1] if trace else {}
+            logger.error(
+                "run_complex_task failed: %s", e,
+                extra={"request_id": request_id, "stage": failed_entry.get("stage")}
+            )
+            rec = receipt_mod.build_receipt(
+                status="failed", query=user_query, started_at=started_at, finished_at=finished_at,
+                config=self.config, request_id=request_id, trace=trace, macro_iteration=macro_iteration,
+                error={"stage": failed_entry.get("stage"), "role": failed_entry.get("role"),
+                       "model": failed_entry.get("model"), "message": str(e)},
+            )
+            rec.update({
+                "plan": None, "implementation": None, "fast_path": False,
+                "qa_approved": None, "qa_feedback": None, "breakdown": None,
+                "closing_report": None, "deviation": None, "macro_iteration": macro_iteration,
+            })
+            return rec
+
+        finished_at = receipt_mod.now()
+        rec = receipt_mod.build_receipt(
+            status="completed", query=user_query, started_at=started_at, finished_at=finished_at,
+            config=self.config, request_id=request_id, trace=trace, macro_iteration=macro_iteration,
+            outcome=body["outcome"], artifacts=body["artifacts"],
+        )
+        rec.update(body["legacy"])
+        return rec
+
+    async def _run_pipeline_body(
+        self,
+        user_query: str,
+        request_id: str,
+        trace: List[Dict[str, Any]],
+        on_chunk: Optional[Callable[[str, str, Optional[int]], None]],
+        prior_breakdown: Optional[str],
+        prior_report: Optional[str],
+        macro_iteration: int,
+        output_contract: Optional[str],
+    ) -> Dict[str, Any]:
+        """
+        The actual pipeline logic, split out from run_complex_task so the latter can wrap
+        it in asyncio.wait_for (timeout) and a try/except (failure receipt) without the
+        control flow of the pipeline itself having to know about either concern. Returns
+        {"outcome": ..., "artifacts": ..., "legacy": ...} — three views of the same run
+        that run_complex_task combines into the final receipt.
+        """
         # 0. Router: classify and short-circuit simple/error-reaction queries.
         # Skipped entirely on a macro-loop re-entry (prior_breakdown given) — we already
         # know this is a full-pipeline task, and re-classifying risks a fast-path misroute
@@ -335,23 +464,34 @@ class Orchestrator:
             )
             trace.append(entry)
             return {
-                "plan": None,
-                "implementation": answer,
-                "fast_path": True,
-                "qa_approved": None,
-                "qa_feedback": None,
-                "breakdown": None,
-                "closing_report": None,
-                "deviation": None,
-                "request_id": request_id,
-                "trace": trace,
-                "macro_iteration": macro_iteration,
+                "outcome": {
+                    "router_decision": decision,
+                    "fast_path": True,
+                    "rag": {"ran": False},
+                    "design_gate": {"ran": False},
+                    "implementation_check": {"ran": False},
+                    "closing_report": {"ran": False},
+                },
+                "artifacts": {"implementation": answer},
+                "legacy": {
+                    "plan": None,
+                    "implementation": answer,
+                    "fast_path": True,
+                    "qa_approved": None,
+                    "qa_feedback": None,
+                    "breakdown": None,
+                    "closing_report": None,
+                    "deviation": None,
+                    "request_id": request_id,
+                    "trace": trace,
+                    "macro_iteration": macro_iteration,
+                },
             }
 
         max_iterations = self.config.get('pipeline', {}).get('max_qa_iterations', 2)
 
         # 1. Context Retrieval (RAG)
-        context = await self._build_rag_context(user_query, request_id)
+        context, rag_stats = await self._build_rag_context(user_query, request_id)
 
         # 2. Manager: break the goal into a step outline that guides the Architect.
         # On a macro-loop re-entry (prior_breakdown given), this call is skipped and the
@@ -449,6 +589,16 @@ class Orchestrator:
                 "Design gate sectioned result: %s", "APPROVED" if all_approved else "NEEDS_REVISION (partial)",
                 extra={"request_id": request_id, "stage": "design_gate"}
             )
+            section_attempts = {}
+            for qa_entry in trace:
+                if qa_entry.get("stage") == "design_gate" and "section" in qa_entry:
+                    section_attempts.setdefault(qa_entry["section"], {"approved": False, "attempts": 0})
+                    section_attempts[qa_entry["section"]]["attempts"] += 1
+                    section_attempts[qa_entry["section"]]["approved"] = qa_entry["verdict"] == "APPROVED"
+            design_gate_outcome = {
+                "ran": True, "mode": "sectioned", "approved": all_approved,
+                "sections": section_attempts,
+            }
         else:
             logger.info(
                 "Design gate: Architect didn't follow the section format — falling back to monolithic review",
@@ -481,25 +631,30 @@ class Orchestrator:
                     request_id=request_id, attempt=attempt + 2, on_chunk=on_chunk
                 )
                 trace.append(entry)
+            design_gate_outcome = {"ran": True, "mode": "monolithic", "approved": design_approved}
 
         # 4. Implementation Phase with post-implementation QA check
         implementer = self.factory.create_role_model("implementer")
 
         implementation, entry = await self._call_model(
             role="implementer", stage="implementation", model=implementer,
-            prompt=self.prompts.get_implementer_task_template(plan, context),
+            prompt=self.prompts.get_implementer_task_template(plan, context, output_contract=output_contract),
             request_id=request_id, attempt=1, on_chunk=on_chunk
         )
         trace.append(entry)
 
         qa_approved = False
         qa_feedback = None
+        implementation_check_attempts = 0
         for attempt in range(max_iterations + 1):
             review, qa_entry = await self._call_model(
                 role="qa_auditor", stage="implementation_check", model=qa_auditor,
-                prompt=self.prompts.get_qa_review_template(user_query, plan, implementation),
+                prompt=self.prompts.get_qa_review_template(
+                    user_query, plan, implementation, output_contract=output_contract
+                ),
                 request_id=request_id, attempt=attempt + 1
             )
+            implementation_check_attempts += 1
             qa_approved, qa_feedback = self._parse_verdict(review)
             qa_entry["verdict"] = "APPROVED" if qa_approved else "NEEDS_REVISION"
             trace.append(qa_entry)
@@ -525,7 +680,7 @@ class Orchestrator:
             trace.append(entry)
             implementation, entry = await self._call_model(
                 role="implementer", stage="implementation", model=implementer,
-                prompt=self.prompts.get_implementer_task_template(plan, context),
+                prompt=self.prompts.get_implementer_task_template(plan, context, output_contract=output_contract),
                 request_id=request_id, attempt=attempt + 2, on_chunk=on_chunk
             )
             trace.append(entry)
@@ -540,7 +695,8 @@ class Orchestrator:
         # time only, not a model swap.
         closing_report = None
         deviation = None
-        if self.config.get('pipeline', {}).get('closing_report', True):
+        closing_report_ran = self.config.get('pipeline', {}).get('closing_report', True)
+        if closing_report_ran:
             max_impl_chars = self.config.get('pipeline', {}).get(
                 'closing_report_max_implementation_chars', 8000
             )
@@ -566,17 +722,37 @@ class Orchestrator:
             )
 
         return {
-            "plan": plan,
-            "implementation": implementation,
-            "fast_path": False,
-            "qa_approved": qa_approved,
-            "qa_feedback": qa_feedback,
-            "breakdown": breakdown,
-            "closing_report": closing_report,
-            "deviation": deviation,
-            "request_id": request_id,
-            "trace": trace,
-            "macro_iteration": macro_iteration,
+            "outcome": {
+                "router_decision": decision,
+                "fast_path": False,
+                "rag": rag_stats,
+                "design_gate": design_gate_outcome,
+                "implementation_check": {
+                    "ran": True, "approved": qa_approved,
+                    "attempts": implementation_check_attempts, "feedback": qa_feedback,
+                },
+                "closing_report": (
+                    {"ran": True, "deviation": deviation, "summary": summary}
+                    if closing_report_ran else {"ran": False}
+                ),
+            },
+            "artifacts": {
+                "breakdown": breakdown, "plan": plan, "implementation": implementation,
+                "closing_report": closing_report,
+            },
+            "legacy": {
+                "plan": plan,
+                "implementation": implementation,
+                "fast_path": False,
+                "qa_approved": qa_approved,
+                "qa_feedback": qa_feedback,
+                "breakdown": breakdown,
+                "closing_report": closing_report,
+                "deviation": deviation,
+                "request_id": request_id,
+                "trace": trace,
+                "macro_iteration": macro_iteration,
+            },
         }
 
     async def run_simple_query(self, user_query: str) -> str:

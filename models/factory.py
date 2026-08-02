@@ -8,8 +8,9 @@ class ModelFactory:
     Implements the Factory Pattern to centralize object creation.
     """
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, api_url: str = "http://localhost:11434/api"):
         self.config = config
+        self.api_url = api_url
 
     def create_role_model(self, role_name: str) -> BaseModel:
         """
@@ -30,13 +31,12 @@ class ModelFactory:
 
         model_name = role_cfg['model_name']
         capabilities = role_cfg.get('capabilities', [])
-        api_url = "http://localhost:11434/api" # Default for local ollama
         timeout = self.config.get('pipeline', {}).get('request_timeout_seconds', 300.0)
         think = role_cfg.get('think')  # None = model/Ollama default; True/False forces it
 
         # In a real implementation, we might have different subclasses
         # for OpenAI, Anthropic, etc., based on the config.
-        return OllamaModel(name=model_name, role=role_name, capabilities=capabilities, api_url=api_url,
+        return OllamaModel(name=model_name, role=role_name, capabilities=capabilities, api_url=self.api_url,
                             timeout=timeout, think=think)
 
     def create_embedding_model(self) -> BaseModel:
@@ -44,9 +44,10 @@ class ModelFactory:
         embed_cfg = self.config.get('embeddings', {})
         if not embed_cfg:
             raise ValueError("Embedding configuration missing in config.")
-            
+
         return OllamaModel(
             name=embed_cfg['model_name'],
             role="embedding",
-            capabilities=["embedding"]
+            capabilities=["embedding"],
+            api_url=self.api_url,
         )

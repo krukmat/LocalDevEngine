@@ -12,10 +12,12 @@ class Chunk:
 
 
 _PY_UNIT_RE = re.compile(r"^(def |class |@)")
+_GO_UNIT_RE = re.compile(r"^(func |type |package )")
 _MD_UNIT_RE = re.compile(r"^#{1,6} ")
 
 _EXTENSION_SPLITTERS = {
     ".py": "structural",
+    ".go": "structural_go",
     ".md": "headers",
 }
 
@@ -32,6 +34,8 @@ def _split_units(content: str, extension: str) -> List[str]:
 
     if mode == "structural":
         boundary_re = _PY_UNIT_RE
+    elif mode == "structural_go":
+        boundary_re = _GO_UNIT_RE
     elif mode == "headers":
         boundary_re = _MD_UNIT_RE
     else:
@@ -98,8 +102,8 @@ def _line_window_split(unit: str, max_chars: int) -> List[str]:
 def chunk_file(path: str, content: str, max_chars: int = 3000) -> List[Chunk]:
     """
     Splits file content into chunks bounded by max_chars, preferring
-    structural boundaries (functions/classes for .py, headers for .md,
-    blank-line paragraphs otherwise) over blind windows.
+    structural boundaries (functions/classes for .py, func/type/package for
+    .go, headers for .md, blank-line paragraphs otherwise) over blind windows.
 
     Packs consecutive units together while they fit under max_chars. A
     single unit that alone exceeds max_chars falls back to line windows,

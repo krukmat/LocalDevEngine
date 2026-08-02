@@ -49,6 +49,37 @@ class PromptRegistry:
 
     SECTION_NAMES = ("Data Model", "API/Interface", "Error Handling", "Dependencies/Integration")
 
+    # Output contracts: an implementer/QA behavior that's opt-in per run (see
+    # core/orchestrator.py's output_contract param, main.py's --output-contract).
+    # "fenix-tagged-file" is the exact grammar fenix's delegate-low-rri.py parser
+    # (STATUS/SUMMARY/=== FILE START ===/PATH/ACTION/--- CONTENT ---/=== FILE END ===)
+    # already expects from a delegated model — copied verbatim from that script's own
+    # system prompt (build_payload()) so the parser accepts LocalDevEngine's output
+    # unmodified. See docs/plan-mitigation-fenix-outsourcing-controls.md, paso A3.
+    OUTPUT_CONTRACTS = ("fenix-tagged-file",)
+
+    _FENIX_TAGGED_FILE_GRAMMAR = """Return ONLY tagged text in this exact shape:
+STATUS: PATCH
+SUMMARY: short summary
+TEST: optional verification command
+RISK: optional risk note
+=== FILE START ===
+PATH: relative/path.ext
+ACTION: create|modify|delete
+--- CONTENT ---
+<COMPLETE final file contents>
+=== FILE END ===
+Rules: use exactly one STATUS value: PATCH, NO_PATCH, or BLOCKED. Do not output the
+pipe-separated list. No JSON, no markdown fences, no unified diff, no explanations, no
+extra text outside these sections. For ACTION delete, emit empty content. Repeat the
+=== FILE START === block once per file touched."""
+
+    @staticmethod
+    def _output_contract_suffix(output_contract: str = None) -> str:
+        if output_contract == "fenix-tagged-file":
+            return "\n\n" + PromptRegistry._FENIX_TAGGED_FILE_GRAMMAR
+        return ""
+
     @staticmethod
     def get_architect_thinking_template(context: str, goal: str) -> str:
         """Provides a template for deep reasoning (Thinking Mode)."""
@@ -62,10 +93,11 @@ Every section must be present even if brief (e.g. "N/A — no external dependenc
 remove, rename, or reorder sections — the headers are parsed verbatim by the review pipeline."""
 
     @staticmethod
-    def get_implementer_task_template(plan: str, context: str) -> str:
-        """Provides a template for pure implementation."""
+    def get_implementer_task_template(plan: str, context: str, output_contract: str = None) -> str:
+        """Provides a template for pure implementation. output_contract, if given, appends
+        a grammar the Implementer must follow instead of free prose (see OUTPUT_CONTRACTS)."""
         return f"""ARCHITECTURE PLAN:\n{plan}\n\nPROJECT CONTEXT:\n{context}\n\nTASK FOR IMPLEMENTER:\nImplement the code blocks described in the plan.
-Ensure all imports are correct and follow existing coding styles."""
+Ensure all imports are correct and follow existing coding styles.{PromptRegistry._output_contract_suffix(output_contract)}"""
 
     @staticmethod
     def get_manager_breakdown_template(context: str, goal: str) -> str:
@@ -109,11 +141,27 @@ Revise ONLY the "{section_name}" section to address the QA feedback above. Outpu
 section body — do not repeat the "## {section_name}" header, do not output other sections."""
 
     @staticmethod
-    def get_qa_review_template(goal: str, plan: str, implementation: str) -> str:
-        """Post-implementation check: QA compares the implementation against the approved plan."""
+    def get_qa_review_template(goal: str, plan: str, implementation: str, output_contract: str = None) -> str:
+        """Post-implementation check: QA compares the implementation against the approved plan.
+        When output_contract is set, grammar conformance becomes part of the verdict — an
+        implementation a downstream parser can't consume must NOT be APPROVED just because
+        its logic is otherwise correct (see docs/plan-mitigation-fenix-outsourcing-controls.md,
+        paso A3 / fenix gap G11)."""
+        contract_check = ""
+        if output_contract == "fenix-tagged-file":
+            contract_check = f"""
+
+ADDITIONAL CHECK — OUTPUT CONTRACT CONFORMANCE (mandatory, checked BEFORE anything else):
+The implementation above MUST follow this exact grammar, verbatim, with no extra text outside
+its sections:
+{PromptRegistry._FENIX_TAGGED_FILE_GRAMMAR}
+If the implementation does not conform to this grammar exactly (wrong/missing markers, prose
+outside sections, malformed STATUS/ACTION values, etc.), the verdict MUST be NEEDS_REVISION
+regardless of whether the underlying code logic is otherwise correct — a grammar violation
+alone is a defect."""
         return f"""GOAL:\n{goal}\n\nAPPROVED PLAN:\n{plan}\n\nIMPLEMENTATION:\n{implementation}\n\nTASK FOR QA AUDITOR (IMPLEMENTATION CHECK):
 Compare the implementation against the plan and the original goal. Flag any deviation, bug, missing
-piece, or requirement that isn't satisfied.
+piece, or requirement that isn't satisfied.{contract_check}
 
 Respond in EXACTLY this format:
 VERDICT: APPROVED or NEEDS_REVISION

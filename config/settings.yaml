@@ -48,7 +48,7 @@ embeddings:
 
 ingestion:
   max_file_bytes: 1000000
-  extensions: [".py", ".js", ".ts", ".md", ".sql", ".html"]
+  extensions: [".py", ".js", ".ts", ".md", ".sql", ".html", ".go"]
   ignored_dirs: ["node_modules", ".git", "__pycache__", "venv", ".venv", ".vector_store"]
 
 retrieval:
@@ -64,6 +64,12 @@ storage:
 pipeline:
   max_qa_iterations: 2 # Reintentos de QA -> rediseño antes de rendirse
   request_timeout_seconds: 300 # Modelos "thinking" (qwen3.6) + swap en frío pueden tardar minutos
+  max_run_seconds: 1500 # Techo de la corrida COMPLETA de run_complex_task (no por llamada HTTP).
+                         # Si se cumple, produce un recibo status:"timeout" con el trace parcial en
+                         # vez de que el único recurso del llamador sea matar el proceso (perdiendo
+                         # el recibo). Ver docs/plan-mitigation-fenix-outsourcing-controls.md paso A5.
+                         # null/0 desactiva el cap. 1500s da margen sobre los ~24 min observados en
+                         # COMPLEX_ARCHITECTURE real.
   closing_report: true # Manager compara el resultado final contra su propio outline inicial.
                         # Kill-switch para A/B el costo contra un baseline sin este stage.
                         # Ver docs/plan-macro-loop-manager-hitl.md (Fase 1).
