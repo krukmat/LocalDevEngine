@@ -43,6 +43,19 @@ roles:
 embeddings:
   model_name: "nomic-embed-text:latest"
   dimension: 768 # Según metadata de ollama para nomic-embed-text
+  max_chunk_chars: 3000 # límite real medido: /api/embeddings falla ~7700 chars (2048 tokens)
+  batch_size: 16
+
+ingestion:
+  max_file_bytes: 1000000
+  extensions: [".py", ".js", ".ts", ".md", ".sql", ".html"]
+  ignored_dirs: ["node_modules", ".git", "__pycache__", "venv", ".venv", ".vector_store"]
+
+retrieval:
+  top_k: 5
+  min_score: 0.0 # desactivado a propósito: calibrar con los scores logueados por consultas reales
+  max_context_chars: 3000 # techo de TODO el bloque de contexto (incluye el outline del Manager)
+  max_chunks_per_source: 2 # evita que un solo archivo cope el top_k
 
 storage:
   vector_db_path: "./memory/.vector_store"

@@ -123,6 +123,64 @@ class Orchestrator:
         logger.info("Router decision: %s", decision, extra={"request_id": request_id, "stage": "routing"})
         return decision
 
+    async def _build_rag_context(self, user_query: str, request_id: str) -> str:
+        """
+        Retrieves relevant chunks, caps how many come from any single source
+        (so one file can't consume the whole top_k), attributes each with
+        its source, and truncates to max_context_chars. Logs
+        chunks_retrieved/chunks_used/context_chars and every score, since
+        that's the only way to tell whether a NEEDS_REVISION came from the
+        plan or from noisy RAG context.
+        """
+        retrieval_cfg = self.config.get('retrieval', {})
+        top_k = retrieval_cfg.get('top_k', 5)
+        min_score = retrieval_cfg.get('min_score', 0.0)
+        max_context_chars = retrieval_cfg.get('max_context_chars', 3000)
+        max_chunks_per_source = retrieval_cfg.get('max_chunks_per_source', 2)
+
+        logger.info("Searching local context", extra={"request_id": request_id, "stage": "rag"})
+        try:
+            query_vec = await self.embedder.get_embedding(user_query)
+            relevant_chunks = self.memory.search(query_vec, top_k=top_k, min_score=min_score)
+        except EmbeddingTooLargeError:
+            logger.warning(
+                "User query too large to embed — proceeding without RAG",
+                extra={"request_id": request_id, "stage": "rag"}
+            )
+            relevant_chunks = []
+
+        per_source_count: Dict[str, int] = {}
+        used_chunks = []
+        for chunk in relevant_chunks:
+            source = chunk.get("source", "?")
+            if per_source_count.get(source, 0) >= max_chunks_per_source:
+                continue
+            per_source_count[source] = per_source_count.get(source, 0) + 1
+            used_chunks.append(chunk)
+
+        parts = []
+        context_chars = 0
+        for chunk in used_chunks:
+            header = f"# {chunk.get('source', '?')} (score={chunk.get('score', 0):.3f})\n"
+            body = chunk["text"]
+            piece = f"{header}{body}\n"
+            if context_chars + len(piece) > max_context_chars:
+                break
+            parts.append(piece)
+            context_chars += len(piece)
+
+        context = "".join(parts)
+        if not context:
+            context = "No existing local context found."
+
+        logger.info(
+            "RAG: chunks_retrieved=%d chunks_used=%d context_chars=%d scores=%s",
+            len(relevant_chunks), len(parts), context_chars,
+            [round(c.get("score", 0), 3) for c in relevant_chunks],
+            extra={"request_id": request_id, "stage": "rag"}
+        )
+        return context
+
     def _parse_verdict(self, qa_response: str) -> Tuple[bool, str]:
         """
         Parses a QA Auditor response formatted as 'VERDICT: ...' / 'FEEDBACK: ...'.
@@ -173,19 +231,7 @@ class Orchestrator:
         max_iterations = self.config.get('pipeline', {}).get('max_qa_iterations', 2)
 
         # 1. Context Retrieval (RAG)
-        logger.info("Searching local context", extra={"request_id": request_id, "stage": "rag"})
-        try:
-            query_vec = await self.embedder.get_embedding(user_query)
-            relevant_chunks = self.memory.search(query_vec)
-        except EmbeddingTooLargeError:
-            logger.warning(
-                "User query too large to embed — proceeding without RAG",
-                extra={"request_id": request_id, "stage": "rag"}
-            )
-            relevant_chunks = []
-        context = "\n".join([c['text'] for c in relevant_chunks])
-        if not context:
-            context = "No existing local context found."
+        context = await self._build_rag_context(user_query, request_id)
 
         # 2. Manager: break the goal into a step outline that guides the Architect
         manager = self.factory.create_role_model("manager")
@@ -196,7 +242,11 @@ class Orchestrator:
         )
         trace.append(entry)
         context = f"{context}\n\nTASK BREAKDOWN (Manager):\n{breakdown}"
-        logger.info("Context assembled (%d chars)", len(context), extra={"request_id": request_id, "stage": "task_breakdown"})
+        logger.info(
+            "Context assembled (%d chars total, breakdown %d chars)",
+            len(context), len(breakdown),
+            extra={"request_id": request_id, "stage": "task_breakdown"}
+        )
 
         # 3. Architecture Phase with QA design gate (pre-implementation)
         architect = self.factory.create_role_model("architect")
