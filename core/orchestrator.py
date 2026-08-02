@@ -165,7 +165,7 @@ class Orchestrator:
             body = chunk["text"]
             piece = f"{header}{body}\n"
             if context_chars + len(piece) > max_context_chars:
-                break
+                continue
             parts.append(piece)
             context_chars += len(piece)
 
