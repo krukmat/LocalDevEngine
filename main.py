@@ -48,12 +48,17 @@ class DevOrchestratorCLI:
 
     async def ingest(self, directory: str):
         """Index a directory to build the local knowledge base."""
-        print(f"{Colors.CYAN}🚀 Iniciando indexación en:{Colors.ENDC} {directory}")
-        from memory.embeddings import EmbeddingService
-        from memory.local_memory import LocalVectorMemory
-
-        # Re-inicializamos para asegurar que los paths de memoria sean correctos
-        ingestor = DataIngestor(self.orchestrator.memory, self.orchestrator.embedder)
+        ingestion_cfg = self.config.get('ingestion', {})
+        embeddings_cfg = self.config.get('embeddings', {})
+        ingestor = DataIngestor(
+            self.orchestrator.memory,
+            self.orchestrator.embedder,
+            extensions=ingestion_cfg.get('extensions'),
+            ignored_dirs=set(ingestion_cfg.get('ignored_dirs', [])) or None,
+            max_file_bytes=ingestion_cfg.get('max_file_bytes', 1_000_000),
+            max_chunk_chars=embeddings_cfg.get('max_chunk_chars', 3000),
+            batch_size=embeddings_cfg.get('batch_size', 16),
+        )
         await ingestor.ingest_directory(directory)
 
     def _print_result(self, result: dict):
