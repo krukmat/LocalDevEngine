@@ -133,21 +133,24 @@ async def main():
     cli = DevOrchestratorCLI(config_path)
     command = sys.argv[1]
 
-    if command == "ingest":
-        if len(sys.argv) < 3:
-            print("Error: Debes especificar una ruta para indexar.")
-            return
-        await cli.ingest(sys.argv[2])
-    elif command == "ask":
-        query = sys.argv[2] if len(sys.argv) > 2 else ""
-        if not query or query == '""':
-            print("Error: Debes proporcionar una pregunta.")
-            return
-        await cli.ask_once(query)
-    elif command == "chat":
-        await cli.interactive_shell()
-    else:
-        print(f"Comando desconocido: {command}")
+    try:
+        if command == "ingest":
+            if len(sys.argv) < 3:
+                print("Error: Debes especificar una ruta para indexar.")
+                return
+            await cli.ingest(sys.argv[2])
+        elif command == "ask":
+            query = sys.argv[2] if len(sys.argv) > 2 else ""
+            if not query or query == '""':
+                print("Error: Debes proporcionar una pregunta.")
+                return
+            await cli.ask_once(query)
+        elif command == "chat":
+            await cli.interactive_shell()
+        else:
+            print(f"Comando desconocido: {command}")
+    finally:
+        await cli.orchestrator.embedder.aclose()
 
 if __name__ == "__main__":
     asyncio.run(main())

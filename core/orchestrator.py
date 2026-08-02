@@ -8,7 +8,7 @@ import yaml
 import os
 
 from models.factory import ModelFactory
-from memory.embeddings import EmbeddingService
+from memory.embeddings import EmbeddingService, EmbeddingTooLargeError
 from memory.local_memory import LocalVectorMemory
 from prompts.specialized_prompts import PromptRegistry
 
@@ -174,8 +174,15 @@ class Orchestrator:
 
         # 1. Context Retrieval (RAG)
         logger.info("Searching local context", extra={"request_id": request_id, "stage": "rag"})
-        query_vec = await self.embedder.get_embedding(user_query)
-        relevant_chunks = self.memory.search(query_vec)
+        try:
+            query_vec = await self.embedder.get_embedding(user_query)
+            relevant_chunks = self.memory.search(query_vec)
+        except EmbeddingTooLargeError:
+            logger.warning(
+                "User query too large to embed — proceeding without RAG",
+                extra={"request_id": request_id, "stage": "rag"}
+            )
+            relevant_chunks = []
         context = "\n".join([c['text'] for c in relevant_chunks])
         if not context:
             context = "No existing local context found."
