@@ -58,11 +58,40 @@ Which real Ollama model tag backs each role is a config choice, not a fixed requ
 
 ## Getting started
 
-Requires a local [Ollama](https://ollama.com) server running, with the models referenced in `config/settings.yaml` pulled.
+### 1. Prerequisites
+
+- Python 3.10+
+- A local [Ollama](https://ollama.com) server (`ollama serve`), reachable at `http://localhost:11434` (hardcoded default — see [config/settings.yaml](config/settings.yaml))
+- Enough VRAM for whichever model is currently loaded — Ollama swaps models on demand, it doesn't need all of them resident at once
+
+### 2. Install
 
 ```bash
-pip install -r requirements.txt
+git clone https://github.com/krukmat/LocalDevEngine.git
+cd LocalDevEngine
 
+python -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+
+pip install -r requirements.txt
+```
+
+### 3. Pull the models
+
+The default role → model mapping lives in [config/settings.yaml](config/settings.yaml). Pull whatever it currently points to, for example:
+
+```bash
+ollama pull phi3:mini                  # router
+ollama pull gemma4:26b-a4b-it-qat      # manager + qa_auditor
+ollama pull qwen3.6:35b-a3b            # architect + implementer
+ollama pull nomic-embed-text:latest    # embeddings (RAG)
+```
+
+Don't have the VRAM for the defaults? Edit the `model_name` under each role in `config/settings.yaml` to any tag you've pulled locally — the pipeline shape doesn't change, only which model backs each stage. `settings.yaml` is also where you tune retrieval (`retrieval.top_k`, `max_context_chars`), QA retry limits (`pipeline.max_qa_iterations`), and the closing-report macro-loop (`pipeline.closing_report`, `pipeline.max_macro_iterations`).
+
+### 4. Run it
+
+```bash
 # Index a codebase so the pipeline has local context to draw on
 python main.py ingest ./path/to/project
 
