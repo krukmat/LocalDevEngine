@@ -127,9 +127,14 @@ cat task.txt | python main.py ask --json
 # Force the Implementer/QA to follow a strict, machine-parseable file-block
 # grammar instead of free prose (currently one profile: fenix-tagged-file)
 python main.py ask --json --output-contract fenix-tagged-file "add rate limiting to the API layer"
+
+# Ground the pipeline in your real DB schema instead of letting the model guess
+# table/column names — the engine never connects to a database itself; you
+# export a snapshot (see docs/examples/schema-snapshot.example.json) and pass it in
+python main.py ask --json --schema-file schema.json "add pagination to the orders endpoint"
 ```
 
-Every call — including a failed or timed-out one — returns a JSON **receipt**: `status` (`completed`/`failed`/`timeout`), the query and its hash, timing, a `config_fingerprint` snapshot of the models/limits actually used, a per-stage `outcome` (did RAG run and find anything, did the design gate need revisions, was the implementation approved, what did the closing report conclude), and the full `trace`. Exit codes carry transport-level meaning only: **0** = the pipeline ran and produced a receipt (regardless of whether QA approved or a deviation was flagged — that's in the receipt, not the exit code), **2** = the engine itself failed or hit `pipeline.max_run_seconds` (still returns a partial receipt), **3** = usage error (bad flags, unknown command). The receipt is self-reported by the same code it describes, so treat it as a lead to verify, not proof — see [CLAUDE.md](CLAUDE.md)'s "The receipt" section for the full shape and caveats.
+Every call — including a failed or timed-out one — returns a JSON **receipt**: `status` (`completed`/`failed`/`timeout`), the query and its hash, timing, a `config_fingerprint` snapshot of the models/limits actually used, a per-stage `outcome` (did RAG run and find anything, did the design gate need revisions, was the implementation approved, what did the closing report conclude, and — if `--schema-file` was passed — did the deterministic schema block run and what did the post-implementation identifier check find), and the full `trace`. Exit codes carry transport-level meaning only: **0** = the pipeline ran and produced a receipt (regardless of whether QA approved or a deviation was flagged — that's in the receipt, not the exit code), **2** = the engine itself failed or hit `pipeline.max_run_seconds` (still returns a partial receipt), **3** = usage error (bad flags, unknown command — including a missing or malformed `--schema-file`). The receipt is self-reported by the same code it describes, so treat it as a lead to verify, not proof — with one exception: the schema identifier check is plain string comparison against the snapshot you supplied, so you can recompute it yourself and confirm it matches. See [CLAUDE.md](CLAUDE.md)'s "The receipt" and "Schema grounding" sections for the full shape and caveats, and [docs/plan-schema-grounding.md](docs/plan-schema-grounding.md) for what's still unverified about the schema layer (its empirical gate hasn't run yet).
 
 ## Status
 

@@ -502,7 +502,7 @@ class Orchestrator:
           validating the caller's file is the CALLER's error to surface (main.py turns a
           SchemaSnapshotError into EXIT_USAGE), so a malformed snapshot never becomes a
           silently degraded run inside the pipeline. The engine never opens a database
-          connection and never holds credentials — see docs/plan-schema-grounding.md §8.
+          connection and never holds credentials — see docs/plan-schema-grounding.md §7.
 
         Returns a receipt dict (see core/receipt.py / docs/plan-receipt-interface-callers.md):
         schema_version, request_id, status ("completed"|"failed"|"timeout"), query,

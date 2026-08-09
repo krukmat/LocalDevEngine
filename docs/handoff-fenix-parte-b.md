@@ -7,6 +7,20 @@ no se tocó**: vive en otro repo y le corresponde a quien mantiene fenix impleme
 para que esa implementación no tenga que releer el plan completo ni adivinar qué de Parte A quedó
 disponible.
 
+## Aviso: el recibo subió a `schema_version` 1.1
+
+Después de la sesión que cerró Parte A, se agregó una capa opt-in nueva (schema grounding,
+`--schema-file`, ver [docs/plan-schema-grounding.md](plan-schema-grounding.md)) que tocó la forma
+del recibo otra vez. El cambio es **aditivo**: todo lo documentado abajo para Parte A sigue
+presente exactamente igual, con dos claves nuevas en `outcome` (`schema_grounding`,
+`context_budget`), un campo nuevo en `outcome.rag` (`chunks_eligible`) y un sub-bloque nuevo en
+`config_fingerprint` (`request`). Un parser que solo lee las claves que ya conoce sigue
+funcionando sin tocar nada. **La única forma de romperse es si `delegate-local-dev-engine.py`
+valida `schema_version == "1.0"` de forma estricta** (igualdad exacta en vez de "es al menos
+1.0") — si B2 o cualquier otro control hace eso, hay que relajarlo a `>= "1.0"` o listar `"1.0"` y
+`"1.1"` como válidos. Ninguno de los 11 controles de Parte B necesita la capa de schema grounding
+para funcionar; es indiferente a ellos salvo por este chequeo de versión.
+
 ## Qué cambió en LocalDevEngine (Parte A) — disponible para consumir hoy
 
 Todos los pasos A1-A7 del plan están implementados en `main`. Resumen por pieza:
@@ -45,8 +59,13 @@ existente), un objeto `outcome` con:
 "outcome": {
   "router_decision": "CODING_REQUEST",
   "fast_path": false,
-  "rag": {"ran": true, "chunks_retrieved": 5, "chunks_used": 2,
+  "rag": {"ran": true, "chunks_retrieved": 5, "chunks_eligible": 4, "chunks_used": 2,
           "context_chars": 2986, "scores": [0.53, 0.51], "sources": ["core/chunking.py"]},
+  "schema_grounding": {"ran": false},
+  "context_budget": {"ran": true, "max_total_chars": 6000, "schema_chars": 0,
+                      "breakdown_chars": 420, "prior_report_chars": 0, "rag_chars": 2986,
+                      "rag_pieces_included": 2, "rag_pieces_dropped": 2, "reserved_chars": 0,
+                      "used_chars": 3406, "over_budget": false},
   "design_gate": {"ran": true, "mode": "sectioned", "approved": true,
                    "sections": {"Data Model": {"approved": true, "attempts": 1}, ...}},
   "implementation_check": {"ran": true, "approved": true, "attempts": 1, "feedback": null},
@@ -56,7 +75,16 @@ existente), un objeto `outcome` con:
 
 Cada stage opcional trae `"ran": true|false` explícito — nunca hay que inferir "no corrió" de un
 campo en `null` (eso era el hallazgo #5 del receipt plan: antes, `deviation: null` significaba
-tanto "no hubo desvío" como "el stage estaba apagado", indistinguibles).
+tanto "no hubo desvío" como "el stage estaba apagado", indistinguibles). Lo mismo aplica ahora a
+`schema_grounding` (`ran: false` si la corrida no recibió `--schema-file`, o si fue fast-path) y a
+`context_budget` (`ran: false` solo en fast-path, que no arma contexto).
+
+`rag.chunks_eligible` vs. `rag.chunks_used`: `chunks_eligible` es cuántos chunks pasaron el cap
+por-fuente (`max_chunks_per_source`); `chunks_used` es cuántos de esos entraron de verdad en el
+presupuesto compartido después de que el bloque de schema y el outline del Manager reclamaran su
+parte (ver `context_budget` y "Extra: schema grounding" más abajo). Para **B3** (grounding
+relevante al scope), el campo correcto a mirar sigue siendo `chunks_used` — es el que refleja qué
+terminó realmente en el prompt, no solo qué se recuperó.
 
 ### A3 — Perfil de salida `fenix-tagged-file`
 
@@ -87,13 +115,25 @@ Cada recibo trae:
   "models": {"router": "phi3:mini", "manager": "gemma4:26b-a4b-it-qat", ...},
   "max_qa_iterations": 2,
   "closing_report_enabled": true,
-  "retrieval": {"top_k": 5, "min_score": 0.0, "max_context_chars": 3000}
+  "retrieval": {"top_k": 5, "min_score": 0.0, "max_context_chars": 6000},
+  "schema_grounding": {"max_tables": 12, "max_chars": 4000, "fk_expansion_depth": 1},
+  "request": {"output_contract": null, "schema_grounding": false, "schema_tables": 0}
 }
 ```
 
 Construido en `core/receipt.py: build_config_fingerprint()` a partir de `self.config` en el
 momento exacto de esa corrida — no hay forma de que quede desincronizado del `settings.yaml` real
-que se usó.
+que se usó. `max_context_chars` subió de 3000 a 6000 porque ahora es el techo de **todo** el
+contexto ensamblado (schema + outline + RAG), no solo de los chunks — si `delegate-local-dev-engine.py`
+tiene ese número hardcodeado en algún check de B2, hay que actualizarlo.
+
+El sub-bloque `request` es nuevo: a diferencia del resto de `config_fingerprint` (que viene de
+`self.config`, fijo por deploy), estos son los parámetros **de esa corrida puntual** —
+`output_contract` y `schema_grounding`/`schema_tables` no viven en `settings.yaml`, se pasan por
+request. Antes de este cambio, un caller no tenía forma de verificar desde el recibo si
+`--output-contract fenix-tagged-file` estuvo activo en una corrida dada; ahora sí. Relevante para
+**B2**: el chequeo de precondición debería incluir `request.output_contract` si fenix depende de
+que ese contrato esté activo.
 
 ### A5 — Recibo en la falla + `pipeline.max_run_seconds`
 
@@ -133,6 +173,55 @@ Ollama en otro host/puerto y necesita que LocalDevEngine le pegue a ese en vez d
 `Orchestrator` ahora expone `aclose()` y `__aenter__`/`__aexit__`, así que un caller que lo
 embeba como librería (en vez de invocar el CLI) no necesita tocar `orchestrator.embedder`
 directamente.
+
+### Extra: schema grounding (`--schema-file`, opt-in, no forma parte del plan A1-A7)
+
+Construido en una sesión posterior, documentado acá porque toca el recibo que Parte B consume.
+**Fenix no necesita usar esto** — es opt-in y no afecta ningún control B1-B11 si no se pasa
+`--schema-file`. Si en algún momento fenix quisiera exportar el schema de su propia base de datos
+para reducir invención de nombres de tabla/columna en las respuestas del Implementer, la interfaz
+es:
+
+```
+python main.py ask --schema-file schema.json "<query>"
+```
+
+`schema.json` es un snapshot exportado por fenix (tablas/columnas/tipos/FK) — LocalDevEngine
+**nunca** abre una conexión a una base de datos ni ve una credencial; ver
+[docs/plan-schema-grounding.md](plan-schema-grounding.md) §3.1 y §7. Un archivo inválido o
+inexistente es `EXIT_USAGE` (3), nunca una corrida degradada en silencio.
+
+Cuando está activo, `outcome.schema_grounding` trae:
+
+```json
+"schema_grounding": {
+  "ran": true, "source": "schema.json", "dialect": "postgresql",
+  "tables_in_snapshot": 4, "tables_shown": ["public.orders", "public.customers"],
+  "tables_omitted": [], "matched": ["public.orders"], "related_via_fk": ["public.customers"],
+  "strategy": "lexical", "degraded": false, "reason": null,
+  "block_chars": 812, "max_chars": 4000, "block_over_budget": false,
+  "identifier_check": {"ran": true, "checked": 6, "unknown_count": 0,
+                        "known_tables": ["public.customers", "public.orders"],
+                        "unknown_tables": [], "known_columns": ["public.orders.id", ...],
+                        "unknown_columns": []}
+}
+```
+
+`identifier_check` es el único campo de **todo** el recibo (Parte A o esta capa) que no es
+autoreporte puro: es comparación de strings determinista contra un artefacto que el caller ya
+tiene (el mismo `schema.json`), así que fenix puede recomputarlo de forma independiente
+(`context/schema/identifiers.py: check_identifiers(implementation_text, snapshot)`) y verificar
+que coincide — es el único caso en el que el recibo puede *subir* la confianza del caller en vez
+de solo poder bajarla. **Hoy no gatea nada**: un `unknown_count > 0` se reporta pero no cambia
+`implementation_check.approved`. Si fenix quisiera usarlo como señal de auditoría adicional
+(análoga a B3/B4 pero para nombres de schema en vez de gramática de archivo), es una opción real
+hoy — no depende de que LocalDevEngine implemente ningún gate propio primero.
+
+**Estado de esta capa:** construida y verificada offline, pero el gate empírico que demuestra que
+reduce invención de verdad (correr el pipeline completo con y sin el schema sobre casos diseñados
+para fallar) todavía no corrió — ver `docs/plan-schema-grounding.md` §5.2. No es una razón para no
+usarla (es opt-in, sin costo si no se activa), pero sí una razón para no asumir una tasa de
+detección conocida si fenix decide adoptarla ya.
 
 ## Qué NO cambió (y por qué importa para Parte B)
 

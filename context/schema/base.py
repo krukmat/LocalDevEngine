@@ -106,7 +106,7 @@ class SchemaProvider(ABC):
     credentials, open connections, and decide a connection policy per dialect —
     all of which a generic engine would be doing on behalf of a caller who
     already has that access. Keeping the engine snapshot-only makes it stateless
-    and credential-free. See docs/plan-schema-grounding.md §8.
+    and credential-free. See docs/plan-schema-grounding.md §7.
     """
 
     @abstractmethod
