@@ -12,6 +12,7 @@ try:
     from core.ingestor import DataIngestor
     from models.base import ModelCallError
     from prompts.specialized_prompts import PromptRegistry
+    from context.schema import SchemaSnapshotError, SnapshotFileProvider
     import yaml
 except ImportError as e:
     print(f"❌ Error de ruta o carga: {e}")
@@ -154,6 +155,7 @@ class DevOrchestratorCLI:
         out_path: Optional[str] = None,
         quiet: bool = False,
         output_contract: Optional[str] = None,
+        schema_snapshot=None,
     ) -> int:
         """Executes a single inquiry and exits. Never prompts — the macro-loop re-run
         offered after a closing report is a `chat`-only feature (see _maybe_offer_macro_rerun):
@@ -170,12 +172,15 @@ class DevOrchestratorCLI:
           the human-readable stream.
         - quiet: disables on_chunk entirely (no live stream at all).
         - output_contract: forwarded to run_complex_task (see PromptRegistry.OUTPUT_CONTRACTS).
+        - schema_snapshot: an already-parsed SchemaSnapshot (--schema-file was validated at
+          argument-parse time), forwarded for deterministic relational grounding.
         """
         stream_target = sys.stderr if as_json else sys.stdout
         on_chunk = None if quiet else self._make_stage_printer(file=stream_target)
         try:
             result = await self.orchestrator.run_complex_task(
-                query, on_chunk=on_chunk, output_contract=output_contract
+                query, on_chunk=on_chunk, output_contract=output_contract,
+                schema_snapshot=schema_snapshot,
             )
         except ModelCallError as e:
             # Defensive: run_complex_task already catches ModelCallError internally and
@@ -301,7 +306,7 @@ def _parse_ask_args(argv: List[str]):
     unrecognized input must fail with EXIT_USAGE, not be silently ignored."""
     opts = {
         "query": None, "as_json": False, "out_path": None, "quiet": False,
-        "output_contract": None, "input_file": None,
+        "output_contract": None, "input_file": None, "schema_snapshot": None,
     }
     i = 0
     positional: List[str] = []
@@ -332,6 +337,18 @@ def _parse_ask_args(argv: List[str]):
                     f"Valores válidos: {', '.join(PromptRegistry.OUTPUT_CONTRACTS)}."
                 )
             opts["output_contract"] = value
+        elif arg == "--schema-file":
+            if i + 1 >= len(argv):
+                return None, "--schema-file requiere un valor (ruta a un snapshot JSON/YAML)."
+            i += 1
+            # Loaded and validated HERE, at parse time, so a malformed snapshot is a
+            # usage error the caller sees immediately (EXIT_USAGE) instead of a run
+            # that silently proceeds ungrounded. The engine only ever receives an
+            # already-valid snapshot — see run_complex_task's schema_snapshot param.
+            try:
+                opts["schema_snapshot"] = SnapshotFileProvider(argv[i]).load()
+            except SchemaSnapshotError as e:
+                return None, f"--schema-file inválido: {e}"
         elif arg.startswith("--"):
             return None, f"Flag desconocida: {arg}"
         else:
@@ -370,6 +387,9 @@ async def main() -> int:
         print("      --input-file FILE       Lee la query desde FILE en vez de argv")
         print("      (si no hay query posicional ni --input-file, lee de stdin)")
         print(f"      --output-contract X     Uno de: {', '.join(PromptRegistry.OUTPUT_CONTRACTS)}")
+        print("      --schema-file FILE      Snapshot de schema (JSON/YAML) para contexto")
+        print("                              relacional determinista. Lo exporta el llamador;")
+        print("                              el motor no se conecta a ninguna base de datos.")
         print("  python main.py chat                                 # Modo interactivo (REPL)")
         return EXIT_USAGE
 
@@ -392,6 +412,7 @@ async def main() -> int:
             exit_code = await cli.ask_once(
                 opts["query"], as_json=opts["as_json"], out_path=opts["out_path"],
                 quiet=opts["quiet"], output_contract=opts["output_contract"],
+                schema_snapshot=opts["schema_snapshot"],
             )
         elif command == "chat":
             await cli.interactive_shell()

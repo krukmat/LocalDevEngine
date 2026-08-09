@@ -1,0 +1,55 @@
+{
+  "_comment": "Example snapshot for --schema-file. The caller exports this from its own database; the engine never connects to one. Only table names and column names are required — every other key has a defined default, and unknown keys (like this one) are ignored. See docs/plan-schema-grounding.md.",
+  "dialect": "postgresql",
+  "tables": [
+    {
+      "name": "customers",
+      "schema": "public",
+      "comment": "One row per billing entity.",
+      "columns": [
+        { "name": "id", "type": "uuid", "nullable": false, "primary_key": true },
+        { "name": "email", "type": "text", "nullable": false, "comment": "unique, lowercased on write" },
+        { "name": "display_name", "type": "text", "nullable": true },
+        { "name": "created_at", "type": "timestamptz", "nullable": false, "default": "now()" }
+      ]
+    },
+    {
+      "name": "orders",
+      "schema": "public",
+      "columns": [
+        { "name": "id", "type": "bigint", "nullable": false, "primary_key": true },
+        { "name": "customer_id", "type": "uuid", "nullable": false },
+        { "name": "status", "type": "text", "nullable": false, "default": "'pending'" },
+        { "name": "total_cents", "type": "integer", "nullable": false },
+        { "name": "placed_at", "type": "timestamptz", "nullable": false }
+      ],
+      "foreign_keys": [
+        { "columns": ["customer_id"], "references": { "table": "customers", "columns": ["id"] } }
+      ]
+    },
+    {
+      "name": "order_items",
+      "schema": "public",
+      "columns": [
+        { "name": "order_id", "type": "bigint", "nullable": false, "primary_key": true },
+        { "name": "line_no", "type": "integer", "nullable": false, "primary_key": true },
+        { "name": "sku", "type": "text", "nullable": false },
+        { "name": "quantity", "type": "integer", "nullable": false },
+        { "name": "unit_price_cents", "type": "integer", "nullable": false }
+      ],
+      "foreign_keys": [
+        { "columns": ["order_id"], "references": { "table": "orders", "columns": ["id"] } }
+      ]
+    },
+    {
+      "name": "audit_log",
+      "schema": "public",
+      "columns": [
+        { "name": "id", "type": "bigserial", "nullable": false, "primary_key": true },
+        { "name": "actor", "type": "text", "nullable": true },
+        { "name": "action", "type": "text", "nullable": false },
+        { "name": "occurred_at", "type": "timestamptz", "nullable": false }
+      ]
+    }
+  ]
+}

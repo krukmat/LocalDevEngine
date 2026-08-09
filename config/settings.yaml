@@ -54,8 +54,34 @@ ingestion:
 retrieval:
   top_k: 5
   min_score: 0.0 # desactivado a propósito: calibrar con los scores logueados por consultas reales
-  max_context_chars: 3000 # techo de TODO el bloque de contexto (incluye el outline del Manager)
+  max_context_chars: 6000 # Techo REAL de todo el contexto ensamblado: bloque de schema +
+                           # outline del Manager + reporte previo + chunks de RAG. Hasta el
+                           # arreglo del presupuesto esto solo acotaba los chunks y el resto
+                           # se concatenaba encima sin techo; el comentario viejo decía lo
+                           # contrario de lo que el código hacía. Subido de 3000 porque ahora
+                           # cubre bloques que antes no contaba, no porque entre más RAG.
+                           # Ver core/orchestrator.py: _assemble_context.
+  breakdown_reserve_chars: 1200 # Reserva para el outline del Manager, que todavía no existe
+                                 # cuando se arma el contexto que el propio Manager lee. Sin
+                                 # esto, el Architect perdería chunks que el Manager sí vio.
   max_chunks_per_source: 2 # evita que un solo archivo cope el top_k
+
+# Contexto relacional determinista (opt-in por request: --schema-file).
+# NO es RAG: el snapshot no se embebe, no se ingiere al vector store y no lleva score.
+# El motor nunca abre una conexión ni guarda credenciales — el snapshot lo exporta el
+# llamador. Ver docs/plan-schema-grounding.md.
+schema_grounding:
+  max_tables: 12 # tope de tablas renderizadas; el resto se lista por nombre como "existe
+                  # pero no se muestra", que es mejor que omitirlas en silencio
+  max_chars: 4000 # techo del bloque de schema solo; se descuenta de max_context_chars
+  fk_expansion_depth: 1 # 1 a propósito: a profundidad 2 un esquema normalizado alcanza casi
+                         # toda la base y "contexto seleccionado" vuelve a ser "todo"
+  include_all_if_no_match: true # sin match léxico, mostrar todo el snapshot (si entra) en vez
+                                 # de nada: una tabla de más cuesta presupuesto, una de menos
+                                 # hace que el modelo la invente, y solo el segundo falla callado
+  identifier_check: true # auditoría determinista (sin modelo) de los identificadores de la
+                          # implementación final contra el snapshot. No gatea nada: es el
+                          # único dato del recibo que el llamador puede recalcular por su cuenta
 
 storage:
   vector_db_path: "./memory/.vector_store"

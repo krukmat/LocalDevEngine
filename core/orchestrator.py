@@ -13,6 +13,12 @@ from memory.embeddings import EmbeddingService, EmbeddingTooLargeError
 from memory.local_memory import LocalVectorMemory
 from prompts.specialized_prompts import PromptRegistry
 from core import receipt as receipt_mod
+from context.schema import (
+    SchemaSnapshot,
+    check_identifiers,
+    render_schema_block,
+    select_tables,
+)
 
 _VERDICT_RE = re.compile(r"VERDICT:\s*(APPROVED|NEEDS_REVISION)", re.IGNORECASE)
 _FEEDBACK_RE = re.compile(r"FEEDBACK:\s*(.*)", re.IGNORECASE | re.DOTALL)
@@ -202,23 +208,28 @@ class Orchestrator:
         logger.info("Router decision: %s", decision, extra={"request_id": request_id, "stage": "routing"})
         return decision
 
-    async def _build_rag_context(self, user_query: str, request_id: str) -> Tuple[str, Dict[str, Any]]:
+    async def _build_rag_context(
+        self, user_query: str, request_id: str
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """
         Retrieves relevant chunks, caps how many come from any single source
-        (so one file can't consume the whole top_k), attributes each with
-        its source, and truncates to max_context_chars. Logs
-        chunks_retrieved/chunks_used/context_chars and every score, since
-        that's the only way to tell whether a NEEDS_REVISION came from the
-        plan or from noisy RAG context.
+        (so one file can't consume the whole top_k), and formats each with its
+        source attribution. Logs chunks_retrieved and every score, since that's
+        the only way to tell whether a NEEDS_REVISION came from the plan or from
+        noisy RAG context.
 
-        Returns (context, stats) — stats feeds the receipt's outcome.rag block
-        (docs/plan-receipt-interface-callers.md hallazgo #2) so "wrote blind"
-        is a signal a caller can check without parsing logs.
+        Returns (pieces, stats) — formatted, score-ordered, and deliberately NOT
+        truncated here. Truncation is _assemble_context's job, because RAG is the
+        lowest-priority block in a budget shared with the schema block, the
+        Manager outline and the prior-attempt report; cutting it in isolation
+        (as this method used to) enforced a ceiling on one block while the
+        assembled context grew unbounded. stats feeds the receipt's outcome.rag
+        block (docs/plan-receipt-interface-callers.md hallazgo #2), with the
+        used/chars fields filled in by the assembler once the real budget is known.
         """
         retrieval_cfg = self.config.get('retrieval', {})
         top_k = retrieval_cfg.get('top_k', 5)
         min_score = retrieval_cfg.get('min_score', 0.0)
-        max_context_chars = retrieval_cfg.get('max_context_chars', 3000)
         max_chunks_per_source = retrieval_cfg.get('max_chunks_per_source', 2)
 
         logger.info("Searching local context", extra={"request_id": request_id, "stage": "rag"})
@@ -233,45 +244,191 @@ class Orchestrator:
             relevant_chunks = []
 
         per_source_count: Dict[str, int] = {}
-        used_chunks = []
+        pieces: List[Dict[str, Any]] = []
         for chunk in relevant_chunks:
             source = chunk.get("source", "?")
             if per_source_count.get(source, 0) >= max_chunks_per_source:
                 continue
             per_source_count[source] = per_source_count.get(source, 0) + 1
-            used_chunks.append(chunk)
-
-        parts = []
-        context_chars = 0
-        for chunk in used_chunks:
-            header = f"# {chunk.get('source', '?')} (score={chunk.get('score', 0):.3f})\n"
-            body = chunk["text"]
-            piece = f"{header}{body}\n"
-            if context_chars + len(piece) > max_context_chars:
-                continue
-            parts.append(piece)
-            context_chars += len(piece)
-
-        context = "".join(parts)
-        if not context:
-            context = "No existing local context found."
+            header = f"# {source} (score={chunk.get('score', 0):.3f})\n"
+            pieces.append({
+                "text": f"{header}{chunk['text']}\n",
+                "source": source,
+                "score": chunk.get("score", 0),
+            })
 
         scores = [round(c.get("score", 0), 3) for c in relevant_chunks]
-        sources = sorted({c.get("source", "?") for c in used_chunks})
+        sources = sorted({p["source"] for p in pieces})
         logger.info(
-            "RAG: chunks_retrieved=%d chunks_used=%d context_chars=%d scores=%s",
-            len(relevant_chunks), len(parts), context_chars, scores,
+            "RAG: chunks_retrieved=%d chunks_eligible=%d scores=%s",
+            len(relevant_chunks), len(pieces), scores,
             extra={"request_id": request_id, "stage": "rag"}
         )
         stats = {
             "ran": True,
             "chunks_retrieved": len(relevant_chunks),
-            "chunks_used": len(parts),
-            "context_chars": context_chars,
+            "chunks_eligible": len(pieces),
+            "chunks_used": 0,       # filled by _assemble_context
+            "context_chars": 0,     # filled by _assemble_context
             "scores": scores,
             "sources": sources,
         }
+        return pieces, stats
+
+    def _assemble_context(
+        self,
+        *,
+        request_id: str,
+        schema_block: str = "",
+        rag_pieces: Optional[List[Dict[str, Any]]] = None,
+        breakdown: Optional[str] = None,
+        prior_report: Optional[str] = None,
+        reserve_chars: int = 0,
+    ) -> Tuple[str, Dict[str, Any]]:
+        """
+        The single place where the context budget is enforced, over EVERY block
+        that reaches a model prompt — not just the retrieved chunks.
+
+        Priority order is fixed and deliberate, highest first:
+          1. schema block     — deterministic, already capped by its own renderer
+          2. Manager outline  — short, and the Architect's actual instructions
+          3. prior-attempt report (macro-loop) — why this run exists at all
+          4. RAG chunks       — probabilistic, and the only block that degrades
+                                gracefully by having fewer of them
+
+        reserve_chars holds room for a block that doesn't exist yet (the Manager
+        outline is written against a context assembled before it), so the second
+        assembly doesn't have to evict chunks the first one already showed.
+
+        Returns (context, budget_stats); budget_stats becomes outcome.context_budget.
+        """
+        retrieval_cfg = self.config.get('retrieval', {})
+        max_total = retrieval_cfg.get('max_context_chars', 3000)
+        rag_pieces = rag_pieces or []
+
+        blocks: List[str] = []
+        used = 0
+        stats = {
+            "max_total_chars": max_total,
+            "schema_chars": 0,
+            "breakdown_chars": 0,
+            "prior_report_chars": 0,
+            "rag_chars": 0,
+            "rag_pieces_included": 0,
+            "rag_pieces_dropped": 0,
+            "reserved_chars": reserve_chars,
+            "over_budget": False,
+        }
+
+        if schema_block:
+            blocks.append(schema_block)
+            used += len(schema_block)
+            stats["schema_chars"] = len(schema_block)
+
+        if breakdown:
+            piece = f"TASK BREAKDOWN (Manager):\n{breakdown}"
+            blocks.append(piece)
+            used += len(piece)
+            stats["breakdown_chars"] = len(piece)
+
+        if prior_report:
+            piece = f"PREVIOUS ATTEMPT — MANAGER FINDINGS:\n{prior_report}"
+            blocks.append(piece)
+            used += len(piece)
+            stats["prior_report_chars"] = len(piece)
+
+        # Whatever is left after the deterministic/instructional blocks and the
+        # reservation goes to retrieval. A negative remainder is not an error —
+        # it means the higher-priority blocks alone filled the budget, and RAG
+        # is correctly dropped rather than silently pushing past the ceiling.
+        rag_budget = max_total - used - reserve_chars
+        rag_parts: List[str] = []
+        rag_chars = 0
+        for piece in rag_pieces:
+            text = piece["text"]
+            if rag_chars + len(text) > rag_budget:
+                stats["rag_pieces_dropped"] += 1
+                continue
+            rag_parts.append(text)
+            rag_chars += len(text)
+
+        stats["rag_chars"] = rag_chars
+        stats["rag_pieces_included"] = len(rag_parts)
+
+        rag_text = "".join(rag_parts) if rag_parts else "No existing local context found."
+        blocks.insert(0 if not schema_block else 1, f"PROJECT CONTEXT (retrieved, may be incomplete):\n{rag_text}")
+
+        context = "\n\n".join(b for b in blocks if b)
+        stats["used_chars"] = len(context)
+        stats["over_budget"] = len(context) > max_total
+
+        if stats["over_budget"]:
+            # Reported, not truncated: cutting mid-block would corrupt the schema
+            # block's grammar or the outline's meaning. A caller seeing this knows
+            # the run exceeded its own ceiling and by how much.
+            logger.warning(
+                "Context budget exceeded: %d chars assembled over max_context_chars=%d",
+                len(context), max_total,
+                extra={"request_id": request_id, "stage": "context_budget"}
+            )
+        logger.info(
+            "Context assembled: total=%d/%d schema=%d breakdown=%d rag=%d (%d chunks, %d dropped)",
+            stats["used_chars"], max_total, stats["schema_chars"], stats["breakdown_chars"],
+            rag_chars, stats["rag_pieces_included"], stats["rag_pieces_dropped"],
+            extra={"request_id": request_id, "stage": "context_budget"}
+        )
         return context, stats
+
+    def _build_schema_context(
+        self, snapshot, user_query: str, request_id: str
+    ) -> Tuple[str, Dict[str, Any]]:
+        """
+        Selects and renders the deterministic schema block for this query.
+
+        Synchronous and model-free on purpose: nothing here calls Ollama, so a
+        schema block never costs a model swap and never fails the run. The
+        snapshot is provided by the caller (see context/schema/base.py's
+        SchemaProvider docstring for why the engine does not introspect a live
+        database itself).
+        """
+        cfg = self.config.get('schema_grounding', {})
+        selection = select_tables(
+            snapshot,
+            user_query,
+            max_tables=cfg.get('max_tables', 12),
+            fk_expansion_depth=cfg.get('fk_expansion_depth', 1),
+            include_all_if_no_match=cfg.get('include_all_if_no_match', True),
+        )
+        schema_max_chars = cfg.get('max_chars', 4000)
+        block, shown, dropped = render_schema_block(
+            selection, snapshot, max_chars=schema_max_chars
+        )
+        stats = {
+            "ran": True,
+            "source": snapshot.source,
+            "dialect": snapshot.dialect,
+            "tables_in_snapshot": len(snapshot.tables),
+            "tables_shown": shown,
+            "tables_omitted": selection.omitted + dropped,
+            "matched": selection.matched,
+            "related_via_fk": selection.related,
+            "strategy": selection.strategy,
+            "degraded": selection.degraded or bool(dropped),
+            "reason": selection.reason or ("budget_dropped_tables" if dropped else None),
+            "block_chars": len(block),
+            "max_chars": schema_max_chars,
+            # True only when schema_grounding.max_chars is set below the authority
+            # header + one table. The header is never dropped to fit (see
+            # render_schema_block) — this reports the overflow instead of hiding it.
+            "block_over_budget": len(block) > schema_max_chars,
+            "identifier_check": {"ran": False},
+        }
+        logger.info(
+            "Schema grounding: strategy=%s shown=%d/%d chars=%d",
+            selection.strategy, len(shown), len(snapshot.tables), len(block),
+            extra={"request_id": request_id, "stage": "schema_grounding"}
+        )
+        return block, stats
 
     def _parse_verdict(self, qa_response: str) -> Tuple[bool, str]:
         """
@@ -307,6 +464,7 @@ class Orchestrator:
         prior_report: Optional[str] = None,
         macro_iteration: int = 1,
         output_contract: Optional[str] = None,
+        schema_snapshot: Optional[SchemaSnapshot] = None,
     ) -> Dict[str, Any]:
         """
         Main workflow: Router -> (fast path | RAG -> Manager -> Architect<->QA design gate
@@ -338,6 +496,13 @@ class Orchestrator:
           strict machine-parseable grammar instead of free prose, and makes QA reject
           grammar violations regardless of code correctness (see
           docs/plan-mitigation-fenix-outsourcing-controls.md, paso A3).
+        - schema_snapshot, if given, adds a deterministic relational context block ahead
+          of the retrieved chunks and runs a model-free identifier audit on the final
+          implementation. It is a parsed SchemaSnapshot, not a path: loading and
+          validating the caller's file is the CALLER's error to surface (main.py turns a
+          SchemaSnapshotError into EXIT_USAGE), so a malformed snapshot never becomes a
+          silently degraded run inside the pipeline. The engine never opens a database
+          connection and never holds credentials — see docs/plan-schema-grounding.md §8.
 
         Returns a receipt dict (see core/receipt.py / docs/plan-receipt-interface-callers.md):
         schema_version, request_id, status ("completed"|"failed"|"timeout"), query,
@@ -359,12 +524,19 @@ class Orchestrator:
             extra={"request_id": request_id, "stage": "start"}
         )
 
+        request_params = {
+            "output_contract": output_contract,
+            "schema_grounding": schema_snapshot is not None,
+            "schema_tables": len(schema_snapshot.tables) if schema_snapshot is not None else 0,
+        }
+
         try:
             if max_run_seconds:
                 body = await asyncio.wait_for(
                     self._run_pipeline_body(
                         user_query, request_id, trace, on_chunk,
                         prior_breakdown, prior_report, macro_iteration, output_contract,
+                        schema_snapshot,
                     ),
                     timeout=max_run_seconds,
                 )
@@ -372,6 +544,7 @@ class Orchestrator:
                 body = await self._run_pipeline_body(
                     user_query, request_id, trace, on_chunk,
                     prior_breakdown, prior_report, macro_iteration, output_contract,
+                    schema_snapshot,
                 )
         except asyncio.TimeoutError:
             finished_at = receipt_mod.now()
@@ -383,6 +556,7 @@ class Orchestrator:
             rec = receipt_mod.build_receipt(
                 status="timeout", query=user_query, started_at=started_at, finished_at=finished_at,
                 config=self.config, request_id=request_id, trace=trace, macro_iteration=macro_iteration,
+                request_params=request_params,
                 error={"stage": last_entry.get("stage"), "role": last_entry.get("role"),
                        "model": last_entry.get("model"),
                        "message": f"Pipeline exceeded max_run_seconds={max_run_seconds}"},
@@ -403,6 +577,7 @@ class Orchestrator:
             rec = receipt_mod.build_receipt(
                 status="failed", query=user_query, started_at=started_at, finished_at=finished_at,
                 config=self.config, request_id=request_id, trace=trace, macro_iteration=macro_iteration,
+                request_params=request_params,
                 error={"stage": failed_entry.get("stage"), "role": failed_entry.get("role"),
                        "model": failed_entry.get("model"), "message": str(e)},
             )
@@ -417,6 +592,7 @@ class Orchestrator:
         rec = receipt_mod.build_receipt(
             status="completed", query=user_query, started_at=started_at, finished_at=finished_at,
             config=self.config, request_id=request_id, trace=trace, macro_iteration=macro_iteration,
+            request_params=request_params,
             outcome=body["outcome"], artifacts=body["artifacts"],
         )
         rec.update(body["legacy"])
@@ -432,6 +608,7 @@ class Orchestrator:
         prior_report: Optional[str],
         macro_iteration: int,
         output_contract: Optional[str],
+        schema_snapshot: Optional[SchemaSnapshot] = None,
     ) -> Dict[str, Any]:
         """
         The actual pipeline logic, split out from run_complex_task so the latter can wrap
@@ -468,6 +645,11 @@ class Orchestrator:
                     "router_decision": decision,
                     "fast_path": True,
                     "rag": {"ran": False},
+                    # A schema snapshot may have been supplied and still not used:
+                    # the fast path builds no context at all. "ran": False keeps
+                    # that distinguishable from "used and found nothing".
+                    "schema_grounding": {"ran": False},
+                    "context_budget": {"ran": False},
                     "design_gate": {"ran": False},
                     "implementation_check": {"ran": False},
                     "closing_report": {"ran": False},
@@ -490,8 +672,25 @@ class Orchestrator:
 
         max_iterations = self.config.get('pipeline', {}).get('max_qa_iterations', 2)
 
-        # 1. Context Retrieval (RAG)
-        context, rag_stats = await self._build_rag_context(user_query, request_id)
+        # 1a. Deterministic schema context (highest-authority block, model-free).
+        schema_block = ""
+        schema_stats: Dict[str, Any] = {"ran": False}
+        if schema_snapshot is not None:
+            schema_block, schema_stats = self._build_schema_context(
+                schema_snapshot, user_query, request_id
+            )
+
+        # 1b. Context Retrieval (RAG) — lowest-priority block in the shared budget.
+        rag_pieces, rag_stats = await self._build_rag_context(user_query, request_id)
+
+        # Assembled once here for the Manager, reserving room for the outline it is
+        # about to write, then assembled again below with the real outline. Without
+        # the reservation the Manager would see chunks the Architect then loses.
+        breakdown_reserve = self.config.get('retrieval', {}).get('breakdown_reserve_chars', 1200)
+        context, _ = self._assemble_context(
+            request_id=request_id, schema_block=schema_block, rag_pieces=rag_pieces,
+            prior_report=prior_report, reserve_chars=breakdown_reserve,
+        )
 
         # 2. Manager: break the goal into a step outline that guides the Architect.
         # On a macro-loop re-entry (prior_breakdown given), this call is skipped and the
@@ -512,14 +711,14 @@ class Orchestrator:
                 request_id=request_id
             )
             trace.append(entry)
-        context = f"{context}\n\nTASK BREAKDOWN (Manager):\n{breakdown}"
-        if prior_report is not None:
-            context = f"{context}\n\nPREVIOUS ATTEMPT — MANAGER FINDINGS:\n{prior_report}"
-        logger.info(
-            "Context assembled (%d chars total, breakdown %d chars)",
-            len(context), len(breakdown),
-            extra={"request_id": request_id, "stage": "task_breakdown"}
+        # Final assembly, now that every block exists. This is the context every
+        # downstream stage sees, and the only one whose numbers reach the receipt.
+        context, budget_stats = self._assemble_context(
+            request_id=request_id, schema_block=schema_block, rag_pieces=rag_pieces,
+            breakdown=breakdown, prior_report=prior_report,
         )
+        rag_stats["chunks_used"] = budget_stats["rag_pieces_included"]
+        rag_stats["context_chars"] = budget_stats["rag_chars"]
 
         # 3. Architecture Phase with QA design gate (pre-implementation)
         architect = self.factory.create_role_model("architect")
@@ -721,11 +920,30 @@ class Orchestrator:
                 extra={"request_id": request_id, "stage": "closing_report"}
             )
 
+        # Deterministic identifier audit. Runs last, on the final implementation,
+        # and never gates anything — it is a measurement the caller can reproduce
+        # from (implementation, snapshot) without trusting this process at all.
+        # That reproducibility is the point: every other signal in the receipt is
+        # this pipeline grading its own work.
+        if schema_snapshot is not None and self.config.get('schema_grounding', {}).get(
+            'identifier_check', True
+        ):
+            check = check_identifiers(implementation or "", schema_snapshot)
+            schema_stats["identifier_check"] = check.to_dict()
+            logger.info(
+                "Identifier check: checked=%d unknown=%d %s",
+                check.checked, check.unknown_count,
+                (check.unknown_tables + check.unknown_columns) or "",
+                extra={"request_id": request_id, "stage": "schema_grounding"}
+            )
+
         return {
             "outcome": {
                 "router_decision": decision,
                 "fast_path": False,
                 "rag": rag_stats,
+                "schema_grounding": schema_stats,
+                "context_budget": {"ran": True, **budget_stats},
                 "design_gate": design_gate_outcome,
                 "implementation_check": {
                     "ran": True, "approved": qa_approved,

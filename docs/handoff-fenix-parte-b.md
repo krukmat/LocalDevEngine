@@ -106,7 +106,9 @@ que se usó.
   resultado parcial de esas claves, solo el trace/outcome de lo que sí corrió.
 - Verificado en vivo: bajando `max_run_seconds` a 5s y 15s sobre una query de código real, ambos
   casos produjeron un recibo `status: "timeout"` válido (JSON parseable, `error.stage` reflejando
-  la última etapa completada).
+  la última etapa completada). También verificado un `ModelCallError` genuino apuntando
+  `LDE_OLLAMA_HOST` a un puerto inalcanzable: `status: "failed"`, exit 2, `error.message: "All
+  connection attempts failed"`.
 
 **Para B7:** si van a fijar `FENIX_LDE_MAX_WALL_SECONDS` en fenix, debe quedar por encima de
 `max_run_seconds` (1500s hoy) para que el timeout interno del motor dispare primero que el kill
@@ -186,9 +188,14 @@ es la evidencia real de G11 que ese proposal necesita.
 - Exit codes de uso: `--output-contract bogus` → 3; query posicional + argumento extra → 3;
   comando desconocido → 3.
 - Mapeo de exit code para `status: "timeout"`/`"failed"` → 2 (verificado con un Orchestrator fake
-  para no depender de una corrida real).
+  para no depender de una corrida real, y luego confirmado con un `ModelCallError` real apuntando
+  `LDE_OLLAMA_HOST` a un puerto inalcanzable).
 - Chunker Go: reconstrucción lossless verificada sobre un archivo `.go` sintético con
   `func`/`type`/`package`.
+- `closing_report_enabled: false` verificado por lectura de código (`core/orchestrator.py`):
+  `outcome.closing_report` es exactamente `{"ran": false}` cuando `pipeline.closing_report` está
+  apagado — nunca trae `deviation`, así que no puede confundirse con `{"ran": true, "deviation":
+  "NONE"}`.
 - `--output-contract fenix-tagged-file` sobre una tarea de código real (`CODING_REQUEST`,
   "crear `is_palindrome` en `utils/palindrome.py` + tests"): pipeline completo Router→RAG→
   Manager→Architect↔QA (sectioned, una sección — Dependencies/Integration — necesitó una

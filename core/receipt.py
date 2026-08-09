@@ -2,21 +2,35 @@ import hashlib
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-SCHEMA_VERSION = "1.0"
+# 1.0 -> 1.1: outcome gained schema_grounding and context_budget blocks, outcome.rag
+# gained chunks_eligible (and its context_chars now reports what actually reached the
+# prompt, not what one stage produced in isolation), and config_fingerprint gained a
+# "request" sub-block for per-request parameters. All additive — a 1.0 consumer reading
+# only the keys it knows keeps working.
+SCHEMA_VERSION = "1.1"
 
 
 def query_sha256(query: str) -> str:
     return hashlib.sha256(query.encode("utf-8")).hexdigest()
 
 
-def build_config_fingerprint(config: Dict[str, Any]) -> Dict[str, Any]:
-    """Snapshot of the config knobs that change what a receipt's signals mean.
+def build_config_fingerprint(
+    config: Dict[str, Any], request_params: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """Snapshot of the knobs that change what a receipt's signals mean.
     A caller comparing this against its own expected config can tell "the gate
     ran and approved" apart from "the gate was off by config" (see
-    docs/plan-mitigation-fenix-outsourcing-controls.md, paso A4 / control B2)."""
+    docs/plan-mitigation-fenix-outsourcing-controls.md, paso A4 / control B2).
+
+    Config alone was not enough: output_contract and schema grounding are chosen
+    per REQUEST, so a caller reading only config could not tell whether the
+    contract it asked for was actually in force. request_params closes that —
+    same purpose, different lifetime, hence its own sub-block rather than being
+    flattened in with the config knobs."""
     roles = config.get("roles", {})
     pipeline = config.get("pipeline", {})
     retrieval = config.get("retrieval", {})
+    schema_cfg = config.get("schema_grounding", {})
     return {
         "models": {role: cfg.get("model_name") for role, cfg in roles.items()},
         "max_qa_iterations": pipeline.get("max_qa_iterations", 2),
@@ -25,7 +39,15 @@ def build_config_fingerprint(config: Dict[str, Any]) -> Dict[str, Any]:
             "top_k": retrieval.get("top_k", 5),
             "min_score": retrieval.get("min_score", 0.0),
             "max_context_chars": retrieval.get("max_context_chars", 3000),
+            "breakdown_reserve_chars": retrieval.get("breakdown_reserve_chars", 1200),
         },
+        "schema_grounding": {
+            "max_tables": schema_cfg.get("max_tables", 12),
+            "max_chars": schema_cfg.get("max_chars", 4000),
+            "fk_expansion_depth": schema_cfg.get("fk_expansion_depth", 1),
+            "identifier_check": schema_cfg.get("identifier_check", True),
+        },
+        "request": request_params or {},
     }
 
 
@@ -42,6 +64,7 @@ def build_receipt(
     outcome: Optional[Dict[str, Any]] = None,
     artifacts: Optional[Dict[str, Any]] = None,
     error: Optional[Dict[str, Any]] = None,
+    request_params: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Single construction point for the receipt shape (see
@@ -60,7 +83,7 @@ def build_receipt(
         "duration_ms": round((finished_at - started_at).total_seconds() * 1000, 1),
         "macro_iteration": macro_iteration,
         "outcome": outcome or {},
-        "config_fingerprint": build_config_fingerprint(config),
+        "config_fingerprint": build_config_fingerprint(config, request_params),
         "artifacts": artifacts or {},
         "trace": trace,
         "error": error,
