@@ -1,10 +1,23 @@
 # config/settings.yaml
 
+# Cada rol admite opcionalmente think/temperature/keep_alive (ver models/ollama_model.py).
+# Ausente = no se manda esa key en el payload, aplica el default de Ollama/el modelo.
+# keep_alive controla cuánto tiempo Ollama retiene el modelo en VRAM tras la llamada:
+# string de duración ("10m", "1h"), número de segundos, 0 (descargar apenas responde
+# esta llamada) o negativo (mantenerlo cargado indefinidamente). Ningún rol lo fija hoy
+# — esto solo habilita la key; decidir qué rol conviene configurar así queda para cuando
+# haya un llamador real de OllamaModel.unload() (ver docs/plan-model-lifecycle-keep-alive.md).
 roles:
   router:
     model_name: "phi3:mini" # Coincide con el tag real en `ollama list`
     capabilities: ["routing", "filtering"]
     priority: 1
+    temperature: 0.0 # La clasificación debe ser estable para el mismo input, no creativa.
+                      # Bajado tras observar en Fase 3 (schema grounding A/B) que la misma
+                      # query caía en categorías distintas en corridas separadas con el
+                      # default de Ollama (~0.8), rompiendo la comparabilidad WITH/WITHOUT.
+                      # No elimina el ruido (greedy decoding igual puede variar con
+                      # prompts ambiguos) pero lo reduce sustancialmente.
 
   manager:
     model_name: "gemma4:26b-a4b-it-qat"

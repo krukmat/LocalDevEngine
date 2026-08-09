@@ -33,11 +33,13 @@ class ModelFactory:
         capabilities = role_cfg.get('capabilities', [])
         timeout = self.config.get('pipeline', {}).get('request_timeout_seconds', 300.0)
         think = role_cfg.get('think')  # None = model/Ollama default; True/False forces it
+        temperature = role_cfg.get('temperature')  # None = model/Ollama default
+        keep_alive = role_cfg.get('keep_alive')  # None = Ollama's own default (~5m idle retention)
 
         # In a real implementation, we might have different subclasses
         # for OpenAI, Anthropic, etc., based on the config.
         return OllamaModel(name=model_name, role=role_name, capabilities=capabilities, api_url=self.api_url,
-                            timeout=timeout, think=think)
+                            timeout=timeout, think=think, temperature=temperature, keep_alive=keep_alive)
 
     def create_embedding_model(self) -> BaseModel:
         """Creates an embedding model using the configured settings."""

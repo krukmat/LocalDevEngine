@@ -61,7 +61,11 @@ class BaseModel(ABC):
 
     @abstractmethod
     async def unload(self):
-        """Unloads the model from VRAM to free resources."""
+        """Unloads the model from VRAM to free resources.
+
+        Raises:
+            ModelCallError: if the call fails (HTTP/transport error).
+        """
         pass
 
     def __repr__(self) -> str:

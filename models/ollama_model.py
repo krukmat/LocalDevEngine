@@ -1,6 +1,6 @@
 import httpx
 import json
-from typing import AsyncIterator, Dict, Any, Optional
+from typing import AsyncIterator, Dict, Any, Optional, Union
 from models.base import BaseModel, ModelCallError
 
 class OllamaModel(BaseModel):
@@ -10,7 +10,8 @@ class OllamaModel(BaseModel):
     """
 
     def __init__(self, name: str, role: str, capabilities: list[str], api_url: str = "http://localhost:11434/api",
-                 timeout: float = 300.0, think: Optional[bool] = None):
+                 timeout: float = 300.0, think: Optional[bool] = None, temperature: Optional[float] = None,
+                 keep_alive: Optional[Union[str, int, float]] = None):
         super().__init__(name, role)
         self._capabilities = capabilities
         self.api_url = api_url
@@ -22,6 +23,15 @@ class OllamaModel(BaseModel):
         # field on /api/generate, letting settings.yaml turn off slow chain-of-thought
         # reasoning per role if it's not worth the latency for your hardware.
         self.think = think
+        # None = Ollama/model default (usually 0.8). Lower values reduce sampling
+        # randomness — used for the router, whose classification should be stable
+        # for the same input rather than creative.
+        self.temperature = temperature
+        # None = Ollama's own default (~5m idle retention). Accepts a duration string
+        # ("10m", "1h"), a plain number of seconds, 0 (unload right after this response),
+        # or a negative number (keep loaded indefinitely). No role sets this yet — see
+        # docs/plan-model-lifecycle-keep-alive.md.
+        self.keep_alive = keep_alive
 
     @property
     def capabilities(self) -> list[str]:
@@ -42,6 +52,10 @@ class OllamaModel(BaseModel):
             payload["system"] = context["system_prompt"]
         if self.think is not None:
             payload["think"] = self.think
+        if self.temperature is not None:
+            payload["options"] = {"temperature": self.temperature}
+        if self.keep_alive is not None:
+            payload["keep_alive"] = self.keep_alive
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
@@ -71,6 +85,10 @@ class OllamaModel(BaseModel):
             payload["system"] = context["system_prompt"]
         if self.think is not None:
             payload["think"] = self.think
+        if self.temperature is not None:
+            payload["options"] = {"temperature": self.temperature}
+        if self.keep_alive is not None:
+            payload["keep_alive"] = self.keep_alive
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
@@ -90,7 +108,7 @@ class OllamaModel(BaseModel):
 
     async def load(self):
         """
-        In a real scenario, this might involve an explicit 'pull' or ensuring 
+        In a real scenario, this might involve an explicit 'pull' or ensuring
         the model is in the cache. Since we are using a server, we can do
         a dummy call to ensure it's ready and warming up memory.
         """
@@ -102,15 +120,26 @@ class OllamaModel(BaseModel):
                     "prompt": "ping",
                     "stream": False
                 }, timeout=10.0)
-            except Exception:
+            except httpx.HTTPError:
                 pass  # Just ensuring we know it's there
 
     async def unload(self):
         """
-        Ollama doesn't have a direct 'unload' API like some other engines, 
-        but we can rely on its automatic management or provide the concept for future APIs.
+        Evicts the model from VRAM immediately via Ollama's documented mechanism:
+        a generate call with keep_alive: 0 and no prompt. This forces eviction now,
+        overriding whatever self.keep_alive (or Ollama's own default) would otherwise
+        retain — that's the whole point of calling this explicitly.
+
+        Raises:
+            ModelCallError: if the call fails (HTTP/transport error).
         """
-        pass
+        payload = {"model": self.name, "keep_alive": 0, "stream": False}
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            try:
+                response = await client.post(f"{self.api_url}/generate", json=payload, timeout=self.timeout)
+                response.raise_for_status()
+            except httpx.HTTPError as e:
+                raise ModelCallError(str(e) or type(e).__name__) from e
 
     def __repr__(self) -> str:
         return f"<OllamaModel: {self.name} ({self.role})>"
