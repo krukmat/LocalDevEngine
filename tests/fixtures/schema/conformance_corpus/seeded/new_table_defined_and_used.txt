@@ -1,0 +1,18 @@
+Here is the implementation.
+
+```python
+from sqlalchemy import Column, Text, Integer
+from .base import Base
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_log"
+
+    id = Column(Integer, primary_key=True)
+    action = Column(Text, nullable=False)
+
+
+def record(session, action):
+    entry = session.query(AuditLog).filter(AuditLog.action == action).first()
+    return entry
+```

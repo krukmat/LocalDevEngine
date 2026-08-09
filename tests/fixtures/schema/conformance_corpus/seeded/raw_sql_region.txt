@@ -1,0 +1,10 @@
+Here is the implementation.
+
+```sql
+SELECT id, email FROM users WHERE id = :user_id;
+```
+
+```python
+def noop():
+    pass
+```

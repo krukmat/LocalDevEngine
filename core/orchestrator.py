@@ -15,7 +15,7 @@ from prompts.specialized_prompts import PromptRegistry
 from core import receipt as receipt_mod
 from context.schema import (
     SchemaSnapshot,
-    check_identifiers,
+    check as check_conformance,
     render_schema_block,
     select_tables,
 )
@@ -421,7 +421,7 @@ class Orchestrator:
             # header + one table. The header is never dropped to fit (see
             # render_schema_block) — this reports the overflow instead of hiding it.
             "block_over_budget": len(block) > schema_max_chars,
-            "identifier_check": {"ran": False},
+            "conformance_check": {"ran": False},
         }
         logger.info(
             "Schema grounding: strategy=%s shown=%d/%d chars=%d",
@@ -920,20 +920,29 @@ class Orchestrator:
                 extra={"request_id": request_id, "stage": "closing_report"}
             )
 
-        # Deterministic identifier audit. Runs last, on the final implementation,
-        # and never gates anything — it is a measurement the caller can reproduce
-        # from (implementation, snapshot) without trusting this process at all.
-        # That reproducibility is the point: every other signal in the receipt is
-        # this pipeline grading its own work.
+        # Deterministic conformance check (docs/plan-schema-conformance.md).
+        # Runs last, on the final implementation, and never gates anything in
+        # `report` mode (the only mode built so far — `enforce` is C.7,
+        # deferred) — it is a measurement the caller can reproduce from
+        # (implementation, snapshot) without trusting this process at all.
+        # That reproducibility is the point: every other signal in the receipt
+        # is this pipeline grading its own work. AST-based (segmentation.py +
+        # extraction.py), not the regex-based check_identifiers() it replaces —
+        # see docs/fase3-decision.md for why that instrument was unusable.
         if schema_snapshot is not None and self.config.get('schema_grounding', {}).get(
             'identifier_check', True
         ):
-            check = check_identifiers(implementation or "", schema_snapshot)
-            schema_stats["identifier_check"] = check.to_dict()
+            allow_new_objects = self.config.get('schema_grounding', {}).get(
+                'allow_new_objects', True
+            )
+            conformance_report = check_conformance(
+                implementation or "", schema_snapshot, allow_new_objects=allow_new_objects
+            )
+            schema_stats["conformance_check"] = conformance_report.to_dict()
             logger.info(
-                "Identifier check: checked=%d unknown=%d %s",
-                check.checked, check.unknown_count,
-                (check.unknown_tables + check.unknown_columns) or "",
+                "Conformance check: verdict=%s violations=%d checked=%d",
+                conformance_report.verdict, len(conformance_report.violations),
+                conformance_report.regions_checked,
                 extra={"request_id": request_id, "stage": "schema_grounding"}
             )
 

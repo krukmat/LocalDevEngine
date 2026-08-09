@@ -1,0 +1,210 @@
+{
+  "_comment": "Corpus for the C.5 gate (docs/plan-schema-conformance.md §6). Each entry maps an implementation text file to its fixture snapshot and the violations a human found by direct inspection of the code, independent of context/schema/conformance.py (avoiding a circular oracle). 'organic' cases are the 15 non-empty Fase 3 receipts (tests/results/schema_ab/raw/); 'seeded' cases fill the SQLAlchemy pattern coverage gap flagged in plan-schema-conformance.md §2.4 (only 5/18 organic receipts use SQLAlchemy declarative).",
+  "cases": [
+    {
+      "id": "organic_hostile_naming_table_name_without",
+      "kind": "organic",
+      "implementation_file": "organic/hostile_naming__table_name__without.txt",
+      "snapshot_fixture": "hostile_naming.json",
+      "expected_violations": [
+        {"type": "UNKNOWN_COLUMN_REF", "detail": "clientes.id"},
+        {"type": "UNKNOWN_COLUMN_REF", "detail": "clientes.id"}
+      ],
+      "notes": "Genuine Fase 3 hallucination (fase3-decision.md §2). Real PK is id_cliente (hostile naming fixture); model wrote Cliente.id twice in db.query(Cliente).filter(Cliente.id == cliente_id)."
+    },
+    {
+      "id": "organic_hostile_naming_table_name_with",
+      "kind": "organic",
+      "implementation_file": "organic/hostile_naming__table_name__with.txt",
+      "snapshot_fixture": "hostile_naming.json",
+      "expected_violations": [],
+      "notes": "Same query, WITH schema block. No __tablename__/Column patterns present at all (implementation is validators/prose only) — clean by absence of SQLAlchemy constructs, not by correct resolution."
+    },
+    {
+      "id": "organic_small_table_name_with",
+      "kind": "organic",
+      "implementation_file": "organic/small__table_name__with.txt",
+      "snapshot_fixture": "small.json",
+      "expected_violations": [],
+      "notes": "Genuine Fase 3 event (fase3-decision.md §2): model invents table discount_codes, absent from the authoritative block. Not a violation under allow_new_objects=true (the decided default) — DiscountCode.code/id/etc. resolve against the table's OWN Column(...) definitions in the same output. See small_table_name_with_strict for the allow_new_objects=false reading of the same file."
+    },
+    {
+      "id": "organic_small_table_name_with_strict",
+      "kind": "organic",
+      "implementation_file": "organic/small__table_name__with.txt",
+      "snapshot_fixture": "small.json",
+      "allow_new_objects": false,
+      "expected_violations": [
+        {"type": "NEW_OBJECT_DEFINED", "detail": "discount_codes"},
+        {"type": "NEW_OBJECT_DEFINED", "detail": "discount_codes.id"},
+        {"type": "NEW_OBJECT_DEFINED", "detail": "discount_codes.code"},
+        {"type": "NEW_OBJECT_DEFINED", "detail": "discount_codes.type"},
+        {"type": "NEW_OBJECT_DEFINED", "detail": "discount_codes.value"},
+        {"type": "NEW_OBJECT_DEFINED", "detail": "discount_codes.max_uses"},
+        {"type": "NEW_OBJECT_DEFINED", "detail": "discount_codes.used_count"},
+        {"type": "NEW_OBJECT_DEFINED", "detail": "discount_codes.expires_at"},
+        {"type": "NEW_OBJECT_DEFINED", "detail": "discount_codes.is_active"},
+        {"type": "NEW_OBJECT_DEFINED", "detail": "discount_codes.created_at"},
+        {"type": "NEW_OBJECT_DEFINED", "detail": "orders.discount_code_applied"},
+        {"type": "NEW_OBJECT_DEFINED", "detail": "orders.discount_amount_cents"}
+      ],
+      "notes": "Same file as organic_small_table_name_with, evaluated with allow_new_objects=false (a closed-schema caller). Every new table/column becomes a reported violation, none of them a hallucinated REFERENCE."
+    },
+    {
+      "id": "organic_small_table_name_without",
+      "kind": "organic",
+      "implementation_file": "organic/small__table_name__without.txt",
+      "snapshot_fixture": "small.json",
+      "expected_violations": [],
+      "notes": "Same query, no schema block. Model added columns directly on orders (discount_code/discount_amount) instead of a new table; Order.id resolves correctly against orders.id in the snapshot."
+    },
+    {
+      "id": "organic_medium_table_name_with",
+      "kind": "organic",
+      "implementation_file": "organic/medium__table_name__with.txt",
+      "snapshot_fixture": "medium.json",
+      "expected_violations": [],
+      "notes": "Task/__tablename__='tasks' resolves against medium.json's tasks table. No column-attribute references found on Task in this file."
+    },
+    {
+      "id": "organic_medium_table_name_without",
+      "kind": "organic",
+      "implementation_file": "organic/medium__table_name__without.txt",
+      "snapshot_fixture": "medium.json",
+      "expected_violations": [
+        {"type": "UNTYPED_REGION", "detail": "(any)"}
+      ],
+      "notes": "Task.__table__.select() is SQLAlchemy Core machinery (dunder), not a column reference — must NOT be flagged. One fenced block in this file has no declared/recognized language and is expected to surface as UNTYPED_REGION; exact wording of detail is not asserted, only the type and count (1)."
+    },
+    {
+      "id": "organic_hostile_naming_column_only_with",
+      "kind": "organic",
+      "implementation_file": "organic/hostile_naming__column_only__with.txt",
+      "snapshot_fixture": "hostile_naming.json",
+      "expected_violations": [],
+      "notes": "No __tablename__/Column/query/select patterns present — clean by absence of recognized constructs."
+    },
+    {
+      "id": "organic_hostile_naming_column_only_without",
+      "kind": "organic",
+      "implementation_file": "organic/hostile_naming__column_only__without.txt",
+      "snapshot_fixture": "hostile_naming.json",
+      "expected_violations": [],
+      "notes": "No recognized SQLAlchemy patterns present."
+    },
+    {
+      "id": "organic_hostile_naming_generic_with",
+      "kind": "organic",
+      "implementation_file": "organic/hostile_naming__generic__with.txt",
+      "snapshot_fixture": "hostile_naming.json",
+      "expected_violations": [],
+      "notes": "No recognized SQLAlchemy patterns present."
+    },
+    {
+      "id": "organic_medium_column_only_with",
+      "kind": "organic",
+      "implementation_file": "organic/medium__column_only__with.txt",
+      "snapshot_fixture": "medium.json",
+      "expected_violations": [],
+      "notes": "No recognized SQLAlchemy patterns present."
+    },
+    {
+      "id": "organic_medium_column_only_without",
+      "kind": "organic",
+      "implementation_file": "organic/medium__column_only__without.txt",
+      "snapshot_fixture": "medium.json",
+      "expected_violations": [],
+      "notes": "No recognized SQLAlchemy patterns present."
+    },
+    {
+      "id": "organic_small_column_only_with",
+      "kind": "organic",
+      "implementation_file": "organic/small__column_only__with.txt",
+      "snapshot_fixture": "small.json",
+      "expected_violations": [],
+      "notes": "No recognized SQLAlchemy patterns present."
+    },
+    {
+      "id": "organic_small_column_only_without",
+      "kind": "organic",
+      "implementation_file": "organic/small__column_only__without.txt",
+      "snapshot_fixture": "small.json",
+      "expected_violations": [
+        {"type": "UNPARSEABLE_REGION", "detail": "(any)"}
+      ],
+      "notes": "One python-declared fenced block is a bare method fragment (async def at unexpected indent, no enclosing class) — not valid standalone Python, ast.parse must fail on it. Exact SyntaxError message not asserted, only the type and count (1)."
+    },
+    {
+      "id": "organic_small_generic_with",
+      "kind": "organic",
+      "implementation_file": "organic/small__generic__with.txt",
+      "snapshot_fixture": "small.json",
+      "expected_violations": [],
+      "notes": "Prose-only response (fast path / no code fences) — nothing to check, zero regions."
+    },
+    {
+      "id": "organic_small_generic_without",
+      "kind": "organic",
+      "implementation_file": "organic/small__generic__without.txt",
+      "snapshot_fixture": "small.json",
+      "expected_violations": [],
+      "notes": "Prose-only response — nothing to check, zero regions."
+    },
+    {
+      "id": "seeded_clean_known_table",
+      "kind": "seeded",
+      "implementation_file": "seeded/clean_known_table.txt",
+      "snapshot_fixture": "small.json",
+      "expected_violations": [],
+      "notes": "Baseline positive case: class User(Base): __tablename__ = \"users\" matches small.json's users table; User.email resolves against a Column defined in the same class. Filling the pattern-coverage gap flagged in plan-schema-conformance.md §2.4 — only 5/18 organic receipts exercise SQLAlchemy declarative at all."
+    },
+    {
+      "id": "seeded_unknown_table_ref",
+      "kind": "seeded",
+      "implementation_file": "seeded/unknown_table_ref.txt",
+      "snapshot_fixture": "small.json",
+      "expected_violations": [
+        {"type": "UNKNOWN_TABLE_REF", "detail": "Subscription"}
+      ],
+      "notes": "session.query(Subscription) where Subscription is never defined anywhere in the output and is not a table in small.json. Central case the verifier exists to catch: a class name used in a query with no backing __tablename__ definition and no snapshot match."
+    },
+    {
+      "id": "seeded_unknown_column_ref",
+      "kind": "seeded",
+      "implementation_file": "seeded/unknown_column_ref.txt",
+      "snapshot_fixture": "small.json",
+      "expected_violations": [
+        {"type": "UNKNOWN_COLUMN_REF", "detail": "products.discount_percent"}
+      ],
+      "notes": "Product/products resolves (matches small.json), but Product.discount_percent is neither a Column defined in this output's Product class nor a column in the products table of small.json. Same shape as the genuine Cliente.id Fase 3 event, seeded because the organic corpus has only one example of this pattern."
+    },
+    {
+      "id": "seeded_new_table_defined_and_used",
+      "kind": "seeded",
+      "implementation_file": "seeded/new_table_defined_and_used.txt",
+      "snapshot_fixture": "small.json",
+      "expected_violations": [],
+      "notes": "AuditLog/audit_log is absent from small.json (NEW_OBJECT_DEFINED, not reported under the default allow_new_objects=true) and AuditLog.action resolves against its own Column definition in the same output — confirms a self-defined table's columns do not spuriously trigger UNKNOWN_COLUMN_REF."
+    },
+    {
+      "id": "seeded_raw_sql_region",
+      "kind": "seeded",
+      "implementation_file": "seeded/raw_sql_region.txt",
+      "snapshot_fixture": "small.json",
+      "expected_violations": [
+        {"type": "UNPARSEABLE_REGION", "detail": "sql region (sqlglot deferred, see §5)"}
+      ],
+      "notes": "A ```sql fenced block, even syntactically valid and referencing a real table (users), is never parsed (§5 — sqlglot deferred) and must always surface as UNPARSEABLE_REGION, not silently accepted or silently skipped."
+    },
+    {
+      "id": "seeded_untyped_fence",
+      "kind": "seeded",
+      "implementation_file": "seeded/untyped_fence.txt",
+      "snapshot_fixture": "small.json",
+      "expected_violations": [
+        {"type": "UNTYPED_REGION", "detail": "(no language declared)"}
+      ],
+      "notes": "A fenced block with no language tag after ``` must surface as UNTYPED_REGION regardless of what it contains — the fail-safe half of §3's 'never silently accepted' rule."
+    }
+  ]
+}

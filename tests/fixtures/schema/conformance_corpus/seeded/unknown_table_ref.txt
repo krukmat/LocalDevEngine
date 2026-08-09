@@ -1,0 +1,9 @@
+Here is the implementation.
+
+```python
+from sqlalchemy.orm import Session
+
+
+def list_active_subscriptions(session: Session, user_id: str):
+    return session.query(Subscription).filter(Subscription.user_id == user_id).all()
+```

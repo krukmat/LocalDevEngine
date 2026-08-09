@@ -92,9 +92,20 @@ schema_grounding:
   include_all_if_no_match: true # sin match léxico, mostrar todo el snapshot (si entra) en vez
                                  # de nada: una tabla de más cuesta presupuesto, una de menos
                                  # hace que el modelo la invente, y solo el segundo falla callado
-  identifier_check: true # auditoría determinista (sin modelo) de los identificadores de la
-                          # implementación final contra el snapshot. No gatea nada: es el
-                          # único dato del recibo que el llamador puede recalcular por su cuenta
+  identifier_check: true # corre el verificador de conformidad determinista (sin modelo,
+                          # docs/plan-schema-conformance.md) sobre la implementación final
+                          # contra el snapshot. No gatea nada en modo `report` (el único
+                          # modo construido hoy — `enforce` es C.7, diferido): el resultado
+                          # queda en outcome.schema_grounding.conformance_check, recalculable
+                          # por el llamador a partir de (implementación, snapshot). Reemplaza
+                          # al check_identifiers() basado en regex — ver docs/fase3-decision.md
+                          # para el diagnóstico de por qué ese instrumento era inutilizable.
+  allow_new_objects: true # si NEW_OBJECT_DEFINED (una tabla/columna nueva que el propio
+                           # output define) se reporta como violación. `true`: crear una
+                           # tabla nueva es ingeniería legítima, no se marca. `false`: para
+                           # un llamador con schema cerrado. Sin efecto operativo hasta que
+                           # exista `enforce` (C.7, diferido) — hoy solo cambia qué aparece
+                           # listado en el reporte. Ver docs/plan-schema-conformance.md §4.
 
 storage:
   vector_db_path: "./memory/.vector_store"

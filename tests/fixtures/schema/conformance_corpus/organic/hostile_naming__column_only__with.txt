@@ -1,0 +1,88 @@
+```python
+import logging
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+
+def add_monto_total_index(
+    connection, 
+    table_name: str = 'facturas', 
+    column_name: str = 'montoTotal', 
+    index_name: str = 'idx_montoTotal', 
+    algorithm_hint: Optional[str] = None
+) -> bool:
+    """
+    Adds an index to the montoTotal column. Idempotent: returns True if index exists or is created.
+    
+    Uses context managers to ensure cursor resources are released immediately,
+    preventing file descriptor exhaustion and connection pool depletion.
+    
+    Args:
+        connection: Active database connection object (must support context manager for .cursor()).
+        table_name: Name of the target table ('facturas').
+        column_name: Name of the column to index ('montoTotal').
+        index_name: Name for the new index.
+        algorithm_hint: Optional MySQL DDL hint (e.g., 'ALGORITHM=INPLACE, LOCK=NONE').
+        
+    Returns:
+        bool: True if index exists/is created.
+        
+    Raises:
+        Exception: Re-raises any unexpected database errors after logging them.
+    """
+    # Construct DDL dynamically. 
+    # NOTE: Table and column names are identifiers and must be quoted directly.
+    # In production, ensure these values are strictly validated against a whitelist 
+    # to prevent SQL injection, as they cannot always be parameterized in all drivers.
+    base_query = f"ALTER TABLE `{table_name}` ADD INDEX `{index_name}` (`{column_name}`)"
+    if algorithm_hint:
+        base_query += f" {algorithm_hint}"
+    
+    create_query = base_query + ";"
+
+    # Check existing schema state using parameterized query for safety
+    check_query = """
+        SELECT 1 FROM information_schema.statistics 
+        WHERE table_schema = DATABASE() 
+          AND table_name = %s 
+          AND index_name = %s
+    """
+    
+    try:
+        # Use context manager to guarantee cursor.close() is called automatically
+        with connection.cursor() as cursor:
+            # Execute pre-flight check
+            cursor.execute(check_query, (table_name, index_name))
+            
+            if cursor.fetchone():
+                return True  # Index already exists; idempotent success
+
+            # If not present, create the index using the same cursor context
+            cursor.execute(create_query)
+        
+        # Explicitly commit if autocommit is disabled on the connection.
+        # Many DB-API drivers (mysql-connector, pymysql) require this for DDL 
+        # to persist when autocommit=False.
+        if not getattr(connection, 'autocommit', False):
+            connection.commit()
+            
+        return True
+        
+    except Exception as e:
+        # Handle MySQL Error 1061 (Duplicate entry for key/ER_DUP_KEYNAME)
+        # This can occur in race conditions where another process created the index 
+        # between our check and our DDL execution.
+        if hasattr(e, 'args') and len(e.args) > 0:
+            err_code = e.args[0] if isinstance(e.args[0], int) else None
+            if err_code == 1061:
+                return True
+        
+        # Log the error for observability
+        logger.error(
+            f"Failed to create index {index_name} on {table_name}.{column_name}: {e}"
+        )
+        
+        # Re-raise unexpected exceptions to prevent silent failures in migration scripts
+        raise
+```

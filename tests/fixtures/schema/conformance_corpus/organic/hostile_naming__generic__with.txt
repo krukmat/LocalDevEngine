@@ -1,0 +1,182 @@
+```python
+import re
+from enum import Enum
+from typing import List, Dict, Any, Optional, Set, Tuple
+
+# --- Constants & Configuration ---
+
+LEGACY_TABLES = {"t3_xk_legacy", "mitarbeiter"} 
+INTERPOLATION_PATTERN = re.compile(r'\$\{[^}]+\}|{{[^}]+}}|\$\([^)]+\)')
+
+class ReferenceStatus(Enum):
+    EXISTS = "exists"
+    NOT_FOUND = "not_found"
+    AMBIGUOUS = "ambiguous"
+    SKIPPED = "skipped"
+
+class ReferenceResult:
+    def __init__(self, status: ReferenceStatus, original_input: str, matched_entity: Optional[str] = None):
+        self.status = status
+        self.original_input = original_input
+        self.matched_entity = matched_entity
+
+class AuditReport:
+    def __init__(self):
+        self.valid_entries: List[str] = []
+        self.orphaned_entries: List[str] = []
+        self.ambiguous_entries: List[str] = []
+        self.legacy_warnings: List[str] = []
+
+class SchemaAuditor:
+    def __init__(self, schema_tables: Dict[str, List[str]], config_files: List[Dict]):
+        """
+        Args:
+            schema_tables: Map of table_name -> list of column_names (preserving original casing for reporting if needed, though logic uses lower)
+            config_files: List of parsed config dicts
+        """
+        # Normalize schema keys and values to lowercase for case-insensitive matching logic
+        self.schema_tables_lower = {k.lower(): [c.lower() for c in v] for k, v in schema_tables.items()}
+        
+        # Flatten schema for O(1) lookup: 'table' or 'table.col' -> True
+        self.flat_schema = set()
+        for table, cols in self.schema_tables_lower.items():
+            self.flat_schema.add(table)
+            for col in cols:
+                self.flat_schema.add(f"{table}.{col}")
+        
+        self.config_files = config_files
+
+    def analyze(self) -> AuditReport:
+        report = AuditReport()
+        flattened_configs = self._flatten_config_tree(self.config_files)
+        
+        for key_path, raw_value in flattened_configs:
+            val_str = str(raw_value)
+            
+            # QA Fix B: Pre-process interpolation to prevent false positives on dynamic keys
+            if INTERPOLATION_PATTERN.search(val_str):
+                report.ambiguous_entries.append(key_path)
+                continue
+            
+            # Skip non-string values (ints, bools are usually configuration parameters, not schema refs)
+            if not isinstance(raw_value, str):
+                continue
+                
+            extracted_entities = self._extract_potential_references(val_str)
+            
+            for entity_name in extracted_entities:
+                result = self.validate_reference(entity_name)
+                
+                # QA Fix A: Post-validation Legacy Routing
+                if result.status == ReferenceStatus.EXISTS:
+                    if self._is_legacy_entity(result.matched_entity):
+                        report.legacy_warnings.append(f"{key_path} -> {entity_name}")
+                    else:
+                        report.valid_entries.append(f"{key_path} -> {entity_name}")
+                        
+                elif result.status == ReferenceStatus.NOT_FOUND:
+                    report.orphaned_entries.append(f"{key_path} -> {entity_name}")
+                    
+                elif result.status == ReferenceStatus.AMBIGUOUS:
+                    # Strict alias handling would go here. 
+                    # Currently defaults to orphaned unless explicit alias map is expanded.
+                    report.orphaned_entries.append(f"{key_path} -> {entity_name}")
+
+        return report
+
+    def _is_legacy_entity(self, entity_name: Optional[str]) -> bool:
+        if not entity_name:
+            return False
+        
+        # Check table names exactly (case-insensitive)
+        table_name = entity_name.split('.')[0] if '.' in entity_name else entity_name
+        return table_name.lower() in LEGACY_TABLES
+
+    def validate_reference(self, entity_name: str) -> ReferenceResult:
+        target_lower = entity_name.lower()
+        
+        # 1. Exact Match Check (Case-Insensitive)
+        if target_lower in self.flat_schema:
+            return ReferenceResult(ReferenceStatus.EXISTS, entity_name, entity_name)
+
+        # 2. Ambiguity/Orphan Check
+        # Per architecture plan: Strict exact match required unless alias map exists.
+        # No partial substring matching to avoid noise (e.g. 'id' matching everything).
+        return ReferenceResult(ReferenceStatus.NOT_FOUND, entity_name)
+
+    def _extract_potential_references(self, raw_value: str) -> List[str]:
+        """
+        Extracts potential schema references using regex.
+        Filters out standard SQL keywords to reduce noise.
+        """
+        exclude_keywords = {
+            "select", "from", "where", "and", "or", "join", "left", "right", 
+            "inner", "outer", "on", "as", "if", "else", "true", "false", "null",
+            "int", "varchar", "decimal", "date", "text", "pk", "fk"
+        }
+        
+        candidates = set()
+        # Match identifiers: starts with letter, followed by alnum/underscores. Length > 3 to avoid noise like 'id'.
+        matches = re.findall(r'\b[A-Za-z][A-Za-z0-9_]{2,}\b', raw_value)
+        
+        for match in matches:
+            if match.lower() not in exclude_keywords and len(match) > 3:
+                candidates.add(match)
+                
+        return list(candidates)
+
+    def _flatten_config_tree(self, config_dict: Dict) -> List[Tuple[str, Any]]:
+        """
+        Recursively flattens nested config dicts into (key_path, value) tuples.
+        """
+        items = []
+        for key, value in config_dict.items():
+            current_path = key
+            if isinstance(value, dict):
+                sub_items = self._flatten_config_tree(value)
+                for sub_key, sub_val in sub_items:
+                    items.append((f"{current_path}.{sub_key}", sub_val))
+            else:
+                items.append((current_path, value))
+        return items
+
+# --- Example Usage / Integration Point ---
+
+if __name__ == "__main__":
+    deterministic_schema = {
+        "Cliente": ["id_cliente", "nombre_completo", "correo_electronico"],
+        "facturas": ["id", "clienteId", "montoTotal", "fecha_emision"],
+        "ProductInventory": ["inventoryId", "productSKU", "stockQuantity"],
+        "warehouse_locations": ["location_id", "inventory_id", "aisle", "shelf"],
+        "MITARBEITER": ["PERSONALNUMMER", "NACHNAME", "ABTEILUNG"],
+        "t3_xk_legacy": ["pk", "fk_emp", "val"],
+        "commande_lignes": ["ligne_id", "commande_id", "quantite"],
+        "commandes": ["commande_id", "id_cliente", "statut"]
+    }
+
+    mock_configs = [
+        {
+            "database": {
+                "main_table": "Cliente",          
+                "legacy_ref": "t3_xk_legacy",     
+                "unknown_table": "Users",         
+                "dynamic_host": "db-${ENV}.local" 
+            }
+        },
+        {
+            "orders": {
+                "table": "commandes",             
+                "column": "statut"                
+            }
+        }
+    ]
+
+    auditor = SchemaAuditor(deterministic_schema, mock_configs)
+    report = auditor.analyze()
+
+    print("--- Audit Report ---")
+    print(f"Valid: {report.valid_entries}")
+    print(f"Orphaned: {report.orphaned_entries}")
+    print(f"Ambiguous (Dynamic): {report.ambiguous_entries}")
+    print(f"Legacy Warnings: {report.legacy_warnings}")
+```

@@ -1,0 +1,172 @@
+```python
+import psycopg2
+from psycopg2 import sql, extras
+import logging
+
+# Define custom exceptions for clear error separation
+class ValidationError(Exception):
+    """Raised when input validation fails."""
+    pass
+
+class IndexCreationError(Exception):
+    """Raised when index creation or verification fails."""
+    pass
+
+logger = logging.getLogger(__name__)
+
+def create_index_on_amount_cents(db_url: str, table_name: str) -> None:
+    """
+    Creates an index on the `amount_cents` column of a specified table 
+    if it does not already exist in a valid state.
+    
+    Handles cleanup of invalid (failed/interrupted) indices to ensure schema cleanliness.
+    
+    Args:
+        db_url: PostgreSQL connection string.
+        table_name: Name of the table to index. Must be one of:
+                    'invoice_line_items', 'invoices', 'payments'.
+                    
+    Raises:
+        ValidationError: If table_name is not allowed.
+        IndexCreationError: If index creation fails or post-creation verification 
+                            detects an invalid state.
+        psycopg2.Error: For any underlying database errors (re-raised or wrapped).
+    """
+    
+    # 1. Validation
+    allowed_tables = {"invoice_line_items", "invoices", "payments"}
+    if table_name not in allowed_tables:
+        raise ValidationError(f"Invalid table name: '{table_name}'. Allowed: {allowed_tables}")
+
+    index_name = f"idx_{table_name}_amount_cents"
+
+    # 2. Connection Setup (Autocommit is critical for DDL operations outside transaction blocks)
+    conn = None
+    try:
+        conn = psycopg2.connect(db_url, autocommit=True)
+        cursor = conn.cursor()
+
+        # Helper to check index validity state
+        def get_index_state(idx_name: str):
+            """Returns (exists: bool, is_valid: bool)"""
+            sql_check = sql.SQL("""
+                SELECT 
+                    CASE WHEN pg_index.indisvalid THEN 1 ELSE 0 END as is_valid,
+                    EXISTS (
+                        SELECT 1 FROM pg_index 
+                        JOIN pg_class ON pg_index.indexrelid = pg_class.oid 
+                        WHERE pg_class.relname = {}
+                    ) as exists_idx
+                FROM pg_index 
+                JOIN pg_class ON pg_index.indexrelid = pg_class.oid 
+                WHERE pg_class.relname = {}
+            """).format(sql.Literal(idx_name), sql.Literal(idx_name))
+            
+            cursor.execute(sql_check)
+            result = cursor.fetchone()
+            if not result:
+                return False, False
+            
+            exists_idx = bool(result[1])
+            is_valid = bool(result[0])
+            return exists_idx, is_valid
+
+        # 3. Idempotent Check & Creation
+        
+        # Step 3a: Check for Invalid Index and Cleanup
+        exists_inv, _ = get_index_state(index_name)
+        
+        # Specifically look for indices that exist but are INVALID
+        if exists_inv:
+            # We need to specifically query validity to ensure we drop only invalid ones 
+            # or potentially all versions if we want a hard reset. 
+            # However, an index name is unique in a schema. If it exists, it's either valid or invalid.
+            # Let's double-check validity explicitly for the drop condition logic clarity.
+            
+            sql_validate_check = sql.SQL("""
+                SELECT indisvalid FROM pg_index 
+                JOIN pg_class ON pg_index.indexrelid = pg_class.oid 
+                WHERE pg_class.relname = {}
+            """).format(sql.Literal(index_name))
+            
+            cursor.execute(sql_validate_check)
+            is_invalid_row = cursor.fetchone()
+            
+            if is_invalid_row and not is_invalid_row[0]:
+                # It exists and IS valid. Do nothing.
+                logger.info(f"Valid index {index_name} already exists. Skipping creation.")
+                return
+            else:
+                # It exists but is INVALID, or we can't determine validity (fallback to drop)
+                logger.warning(f"Invalid or suspect index {index_name} found. Cleaning up...")
+                try:
+                    cursor.execute(sql.SQL("DROP INDEX CONCURRENTLY IF EXISTS {}").format(sql.Identifier(index_name)))
+                    logger.info(f"Dropped invalid index {index_name}.")
+                except Exception as drop_err:
+                    logger.error(f"Failed to drop invalid index {index_name}: {drop_err}")
+                    raise IndexCreationError(f"Cleanup failed for {index_name}: {drop_err}")
+
+        # Step 3b: Check for Valid Index (again, after potential cleanup)
+        exists_valid_idx, is_valid = get_index_state(index_name)
+        
+        if exists_valid_idx and is_valid:
+            logger.info(f"Valid index {index_name} confirmed to exist. No action needed.")
+            return
+
+        # Step 3c: Create Index
+        # Use IF NOT EXISTS as a safety net, though logically we shouldn't reach here if valid/index existed
+        sql_create = sql.SQL("""
+            CREATE INDEX CONCURRENTLY IF NOT EXISTS {} 
+            ON {} (amount_cents)
+        """).format(
+            sql.Identifier(index_name),
+            sql.Identifier(table_name)
+        )
+        
+        logger.info(f"Creating index {index_name} on {table_name}...")
+        try:
+            cursor.execute(sql_create)
+        except Exception as create_err:
+            # If creation fails partially, it might leave an invalid index. 
+            # We will verify below, but log this specific error context.
+            logger.error(f"Error during CREATE INDEX {index_name}: {create_err}")
+            raise IndexCreationError(f"Index creation statement failed for {table_name}: {create_err}")
+
+        # 4. Post-Creation Verification
+        # Verify the index is now valid. If it's invalid, the planner won't use it, 
+        # indicating a silent failure (e.g., due to concurrent locks during creation).
+        
+        sql_final_check = sql.SQL("""
+            SELECT indisvalid FROM pg_index 
+            JOIN pg_class ON pg_index.indexrelid = pg_class.oid 
+            WHERE pg_class.relname = {}
+        """).format(sql.Literal(index_name))
+        
+        cursor.execute(sql_final_check)
+        final_result = cursor.fetchone()
+        
+        if final_result:
+            is_now_valid = final_result[0]
+            if not is_now_valid:
+                raise IndexCreationError(
+                    f"Index {index_name} on {table_name} was created but is marked invalid. "
+                    "This usually indicates a failed concurrent creation or schema conflict. "
+                    "Please check database logs and retry."
+                )
+            else:
+                logger.info(f"Successfully created and verified valid index {index_name}.")
+        else:
+            # This case implies the index doesn't exist at all after creation, which should be impossible 
+            # if no exception was raised during CREATE INDEX.
+            raise IndexCreationError(
+                f"Post-creation check failed for {index_name}: Index not found in system catalogs."
+            )
+
+    except psycopg2.Error as e:
+        # Catch specific DB errors, wrap them to ensure consistent error interface
+        raise IndexCreationError(f"Database error during index operation on {table_name}: {e}")
+    finally:
+        if conn and not conn.closed:
+            cursor.close()
+            conn.close()
+```

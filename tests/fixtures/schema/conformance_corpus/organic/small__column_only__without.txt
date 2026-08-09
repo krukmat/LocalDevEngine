@@ -1,0 +1,215 @@
+Here are the implementation blocks for the revised SKU indexing logic, strictly following the architectural plan.
+
+### 1. Data Structure & Storage Layer (`memory/local_memory.py`)
+
+Replace the relevant sections of `LocalMemory` with the updated implementation. Note that this modifies the state attributes and introduces the critical fixes in `add_chunks`, `rebuild_sku_index`, and `get_by_sku`.
+
+```python
+import logging
+import numpy as np
+from typing import List, Dict, Any, Optional
+from pathlib import Path
+
+# Assuming these are imported from your project structure
+# from .utils import normalize_vector, validate_embedding
+
+logger = logging.getLogger(__name__)
+
+class LocalMemory:
+    def __init__(self, embedding_dim: int):
+        self.embedding_dim = embedding_dim
+        # Explicit type hints to enforce contract
+        self._vector_matrix: Optional[np.ndarray] = None  # Shape: (N, D)
+        self._metadata: List[Dict[str, Any]] = []         # Length N
+        self._sku_index: Dict[str, int] = {}              # canonical_sku -> index
+
+    def add_chunks(self, items: List[Dict[str, Any]]) -> None:
+        """
+        Adds chunks to memory. Enforces strict 1:1 alignment between 
+        _metadata and _vector_matrix by zero-padding missing vectors.
+        
+        Critical Fix: Ensures _sku_index entries point to valid indices 
+        in _vector_matrix even if vectors are sparse/missing at ingestion.
+        """
+        if not items:
+            return
+
+        # 1. Prepare slots for ALL items (Both Metadata and Vectors)
+        new_metadata_slots = []
+        new_vectors = []
+        
+        # Base index in the global arrays where these new items will land
+        base_index = len(self._metadata)
+        
+        for item in items:
+            metadata_copy = item.copy()
+            
+            # --- Vector Handling (Critical Fix for QA Point 1 & 3) ---
+            # We MUST append a vector to maintain matrix shape.
+            if "vector" in item and item["vector"] is not None:
+                new_vectors.append(item["vector"])
+            else:
+                # Pad with zeros if vector is missing. 
+                # This allows the SKU index to point to valid entries, 
+                # though the vector similarity score will be effectively 0 or minimal.
+                logger.debug(
+                    f"Missing vector for item {item.get('id', 'unknown')}. "
+                    f"Padding with zero vector to maintain matrix alignment."
+                )
+                new_vectors.append(np.zeros(self.embedding_dim, dtype=np.float32))
+
+            # --- SKU Handling (Critical Fix for QA Point 1) ---
+            sku_raw = metadata_copy.get("sku")
+            canonical_sku = None
+            
+            if sku_raw is not None:
+                try:
+                    canonical_sku = str(sku_raw).strip().upper()
+                    metadata_copy["sku"] = canonical_sku # Normalize in storage too
+                except (TypeError, ValueError):
+                    logger.warning(f"Invalid SKU type in metadata: {sku_raw}. Skipping index.")
+
+            new_metadata_slots.append(metadata_copy)
+
+        # 2. Update Global State (Atomic Operation within this method)
+        
+        # A. Extend Metadata
+        self._metadata.extend(new_metadata_slots)
+        
+        # B. Extend Vector Matrix
+        # Convert list of vectors to numpy array. 
+        # Note: new_vectors is guaranteed to have length == len(items)
+        if not self._vector_matrix:
+            # Initialize matrix
+            initial_vecs = np.array(new_vectors, dtype=np.float32)
+            self._vector_matrix = initial_vecs
+        else:
+            # Append to existing matrix
+            new_block = np.array(new_vectors, dtype=np.float32)
+            self._vector_matrix = np.vstack([self._vector_matrix, new_block])
+
+        # C. Update SKU Index (Sparse Index)
+        # Iterate with enumerate to align perfectly with the newly appended slots
+        for i, meta in enumerate(new_metadata_slots):
+            target_idx = base_index + i
+            sku_raw = meta.get("sku")
+            
+            if sku_raw:
+                # Use the canonical version stored in metadata
+                self._sku_index[sku_raw] = target_idx
+                # Logic: Last-write-wins. If SKU was already indexed, it now points here.
+
+        self._save()
+
+    def rebuild_sku_index(self) -> None:
+        """
+        Reconstructs _sku_index from current _metadata.
+        Handles 'last-write-wins' semantics correctly.
+        """
+        self._sku_index = {}
+        
+        for idx, meta in enumerate(self._metadata):
+            sku_raw = meta.get("sku")
+            if sku_raw:
+                try:
+                    canonical = str(sku_raw).strip().upper()
+                    # Last-write-wins logic: overwrite previous index
+                    self._sku_index[canonical] = idx
+                except (TypeError, ValueError):
+                    pass
+        
+        # --- QA Point 2 Fix: Corrected Sanity Check ---
+        # Count how many items in metadata actually have a SKU
+        count_items_with_sku = sum(1 for m in self._metadata if m.get("sku") is not None)
+        
+        # If there are NO items with SKUs, counts should be equal (0 == 0)
+        # If there ARE items with SKUs, len(index) <= count_items_with_sku because 
+        # multiple items can share the same canonical SKU (last-write-wins).
+        if self._sku_index and count_items_with_sku > 0:
+            unique_skus_present = sum(1 for m in self._metadata if m.get("sku") is not None)
+            # This check ensures we didn't silently drop keys due to errors,
+            # but it doesn't require a 1:1 match with the count of items.
+            if len(self._sku_index) == 0 and unique_skus_present > 0:
+                 logger.error("SKU Index rebuilt but is empty despite having SKU entries.")
+
+    def get_by_sku(self, sku: str) -> Optional[Dict[str, Any]]:
+        """
+        O(1) lookup for a specific SKU.
+        Returns metadata dict if found. Note: associated vector may be zero-padded 
+        if it was originally missing during ingestion.
+        """
+        if not self._sku_index or not sku:
+            return None
+            
+        canonical_sku = str(sku).strip().upper()
+        idx = self._sku_index.get(canonical_sku)
+        
+        # Safety check: ensure index is within bounds of metadata
+        if idx is not None and 0 <= idx < len(self._metadata):
+            return self._metadata[idx].copy()
+            
+        return None
+
+    # --- Existing methods below (keep as is unless they conflict with new state) ---
+
+    def search(
+        self,
+        query_embedding: List[float],
+        top_k: int = 3,
+        min_score: float = 0.0,
+    ) -> List[Dict[str, Any]]:
+        """
+        Cosine similarity search. Since stored vectors are normalized at write
+        time, this is a plain dot product against a normalized query vector.
+        Returns at most top_k results with score >= min_score.
+        """
+        if self._vector_matrix is None or len(self._metadata) == 0:
+            return []
+
+        # Assuming _validate_embedding and _normalize exist in your utility set
+        query_vec = self._validate_embedding(query_embedding).reshape(1, -1)
+        query_vec = self._normalize(query_vec)
+
+        similarities = np.dot(self._vector_matrix, query_vec.T).flatten()
+        top_indices = np.argsort(similarities)[::-1][:top_k]
+
+        results = []
+        for idx in top_indices:
+            score = float(similarities[idx])
+            if score < min_score:
+                continue
+            res = self._metadata[idx].copy()
+            res["score"] = score
+            results.append(res)
+
+        return results
+
+    def get_all_chunks(self) -> List[Dict[str, Any]]:
+        return [m.copy() for m in self._metadata]
+```
+
+### 2. Orchestrator Integration (`core/orchestrator.py`)
+
+Add or update the `_handle_sku_lookup` method in your `Orchestrator` class. Ensure it handles the case where the SKU exists but the vector is zero-padded (if downstream logic requires it), though generally, the context retrieval is sufficient for fast-path routing.
+
+```python
+    async def _handle_sku_lookup(self, sku: str, request_id: str) -> Dict:
+        """
+        High-speed path for SKU lookups. Bypasses Embedding and Vector Search.
+        """
+        # Direct O(1) lookup guaranteed by LocalMemory revision
+        chunk_data = self.memory.get_by_sku(sku)
+        
+        if not chunk_data:
+            logger.info(f"SKU {sku} not found in local memory", extra={"request_id": request_id})
+            return {"status": "not_found", "sku": sku, "context": ""}
+
+        # Return context. If vector was zero-padded, downstream RAG components 
+        # should treat this as low-confidence or handle it explicitly if needed.
+        return {
+            "status": "success",
+            "sku": sku,
+            "context": chunk_data.get("text", ""),
+            "metadata": chunk_data
+        }
+```

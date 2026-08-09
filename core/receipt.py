@@ -46,6 +46,7 @@ def build_config_fingerprint(
             "max_chars": schema_cfg.get("max_chars", 4000),
             "fk_expansion_depth": schema_cfg.get("fk_expansion_depth", 1),
             "identifier_check": schema_cfg.get("identifier_check", True),
+            "allow_new_objects": schema_cfg.get("allow_new_objects", True),
         },
         "request": request_params or {},
     }

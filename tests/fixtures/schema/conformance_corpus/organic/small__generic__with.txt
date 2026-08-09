@@ -1,0 +1,70 @@
+To transform the high-level goal of **"Improving error handling in the API"** into an actionable project, I have broken this down into two distinct phases: **The Design Phase (Architect)** and **The Execution Phase (Implementer)**.
+
+---
+
+# Project Charter: API Error Handling Standardization
+**Objective:** Implement a centralized, standardized, and secure error-handling mechanism to improve developer experience (DX), ensure consistent client responses, and enhance observability via logging.
+
+---
+
+## Phase 1: Design & Specification
+**Primary Stakeholder:** Architect  
+**Goal:** Define the "Contract" for errors so that both frontend and backend teams have predictable behavior.
+
+### 1.1 Define Error Response Schema
+*   [ ] **Standardize Payload Structure:** Define a consistent JSON object for all error responses (e.g., following RFC 7807 - Problem Details for HTTP APIs).
+    *   *Requirement:* Must include `type` (URI), `title` (short summary), `status` (HTTP code), `detail` (human-readable message), and `instance` (request ID/trace ID).
+*   [ ] **Define Error Categories:** Categorize errors into:
+    *   **Client Errors (4xx):** Validation errors, Authentication, Resource Not Found.
+    *   **Server Errors (5xx):** Database timeouts, Third-party API failures, Uncaught exceptions.
+
+### 1.2 Define HTTP Status Code Mapping
+*   [ ] **Create a Mapping Matrix:** Explicitly map application-level logic to HTTP status codes:
+    *   `InsufficientPermissions` $\rightarrow$ `403 Forbidden`
+    *   `ResourceNotFound` $\rightarrow$ `404 Not Found`
+    *   `ValidationError` $\rightarrow$ `422 Unprocessable Entity` (or 400)
+
+### 1.3 Security & Observability Strategy
+*   [ ] **Data Leakage Prevention Policy:** Define rules to ensure stack traces and sensitive DB queries are stripped from production responses.
+*   [ ] **Logging Schema Design:** Specify what metadata must be captured in logs for every error (e.g., UserID, RequestID, Timestamp, Endpoint, Error Code).
+
+---
+
+## Phase 2: Implementation & Integration
+**Primary Stakeholder:** Implementer  
+**Goal:** Translate the Architect’s specifications into functional code across the codebase.
+
+### 2.1 Core Infrastructure Setup
+*   [ ] **Custom Exception Hierarchy:** Create a base `AppException` class and specialized subclasses (e.g., `NotFoundException`, `ValidationException`) to allow for specific catching in middleware.
+*   [ ] **Global Error Middleware/Interceptor:** Implement a centralized middleware component that:
+    1. Intercepts all unhandled exceptions.
+    2. Maps the custom exception to the defined JSON schema.
+    3. Generates/Attaches a `Correlation ID` for tracking.
+    4. Logs the error with the appropriate severity level (Warn vs. Error).
+
+### 2.2 Refactoring & Application
+*   [ ] **Standardize Validation Errors:** Replace manual `if/else` return statements in controllers with a centralized validation interceptor that returns standardized 422 errors.
+*   [ ] **Refactor Controller Logic:** Update existing endpoints to `throw` specific custom exceptions rather than returning error objects manually. This ensures the middleware handles the response consistently.
+
+### 2.3 Observability Integration
+*   [ ] **Log Implementation:** Integrate the logging mechanism into the global handler. Ensure "500 Internal Server Error" triggers an `Error` level log, while "404 Not Found" triggers a `Warning` or `Info` level log to prevent alert fatigue.
+
+---
+
+## Phase 3: Validation & QA
+**Collaborative Task (Architect + Implementer)**
+
+### 3.1 Test Coverage
+*   [ ] **Unit Tests:** Verify that throwing a custom exception results in the correct HTTP code and JSON structure.
+*   [ ] **Integration Tests:** Perform "Chaos Testing" (e.g., force a database disconnection) to ensure the API returns a clean `500 Internal Server Error` instead of a raw stack trace.
+*   [ ] **Negative Path Testing:** Ensure all defined 4xx error scenarios return the exact schema designed in Phase 1.1.
+
+---
+
+### Deliverables Summary
+| Deliverable | Owner | Output Format |
+| :--- | :--- | :--- |
+| **Error Schema Spec** | Architect | Documentation (Markdown/Swagger) |
+| **Custom Exception Library** | Implementer | Code (New Modules) |
+| **Global Middleware** | Implementer | Code (Middleware Layer) |
+| **Standardized Error Log Sample** | Both | Example Log Entry (JSON) |

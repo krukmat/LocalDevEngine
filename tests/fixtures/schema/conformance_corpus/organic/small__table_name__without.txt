@@ -1,0 +1,173 @@
+Here are the implementation blocks for the Discount Code feature with Optimistic Concurrency Control.
+
+### 1. Data Model (`models/order.py`)
+
+```python
+from decimal import Decimal
+from datetime import datetime
+import sqlalchemy as sa
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from core.database import Base
+
+class Order(Base):
+    __tablename__ = "orders"
+    # ... existing fields (id, status, subtotal, total, etc.) ...
+
+    # Discount Fields
+    discount_code: Mapped[str | None] = mapped_column(sa.String(50), nullable=True)
+    discount_amount: Mapped[Decimal | None] = mapped_column(sa.Numeric(10, 2), nullable=True)
+    discount_percentage: Mapped[float | None] = mapped_column(sa.Float, nullable=True) 
+    applied_at: Mapped[datetime | None] = mapped_column(sa.DateTime, nullable=True)
+
+    # Optimistic Concurrency Control Column
+    version: Mapped[int] = mapped_column(sa.Integer, default=0, server_default="0")
+
+    def apply_discount_internal(self, code: str, amount: Decimal, percentage: float):
+        """Internal helper to set discount state. Does NOT manage version directly."""
+        self.discount_code = code.upper().strip()
+        self.discount_amount = amount
+        self.discount_percentage = percentage 
+        self.applied_at = datetime.utcnow()
+
+    @property
+    def is_terminal(self) -> bool:
+        """Helper to determine if order state allows modification."""
+        # Assuming status field exists; adjust based on actual model definition
+        return self.status in ["PAID", "SHIPPED", "DELIVERED", "CANCELLED"]
+```
+
+### 2. Domain Errors (`domain/discount_errors.py`)
+
+```python
+from enum import Enum
+
+class DiscountStatus(Enum):
+    SUCCESS = 200
+    INVALID_FORMAT = 400
+    EXPIRED = 400
+    MIN_SPEND_NOT_MET = 400
+    PRODUCT_INELIGIBLE = 400
+    
+    # Terminal states
+    TERMINAL_STATE = 409 
+    
+    # Concurrency states
+    OPTIMISTIC_LOCK_CONFLICT = 409
+    STACKING_VIOLATION = 409
+
+class DiscountValidationError(Exception):
+    def __init__(self, status: DiscountStatus, message: str):
+        self.status = status
+        self.message = message
+        super().__init__(message)
+
+class OrderStateError(DiscountValidationError):
+    """Raised when the order is in an invalid state for modification."""
+    pass
+
+class ConcurrencyError(DiscountValidationError):
+    """Raised when the underlying data has changed since the user read it."""
+    pass
+```
+
+### 3. Service Layer (`services/discount_service.py`)
+
+```python
+from sqlalchemy.orm import Session
+from sqlalchemy.exc import StaleDataError
+import re
+from decimal import Decimal
+
+from models.order import Order
+from domain.discount_errors import (
+    DiscountStatus, 
+    DiscountValidationError, 
+    OrderStateError, 
+    ConcurrencyError
+)
+# Assuming PromotionEngine is defined in the project context or imported accordingly
+from services.promotion_engine import PromotionEngine 
+
+class DiscountService:
+    def __init__(self, db_session: Session):
+        self.db = db_session
+
+    def validate_and_apply(self, order_id: int, code_input: str) -> dict:
+        """
+        Orchestrates the full flow: Validation -> State Check -> Persistence.
+        Uses Optimistic Concurrency Control via SQLAlchemy's version_id_col config.
+        """
+        # 1. Basic Input Sanitization
+        clean_code = code_input.strip().upper()
+        if not self._is_valid_format(clean_code):
+            raise DiscountValidationError(DiscountStatus.INVALID_FORMAT, "Invalid format.")
+
+        # Fetch order WITHOUT pessimistic locking
+        order = self.db.query(Order).filter(Order.id == order_id).first()
+        
+        if not order:
+            raise DiscountValidationError(DiscountStatus.INVALID_FORMAT, "Order not found.")
+
+        # 2. Check Terminal State (Business Logic)
+        if order.is_terminal:
+            raise OrderStateError(
+                DiscountStatus.TERMINAL_STATE, 
+                f"Cannot apply discount to order in state '{order.status}'."
+            )
+
+        # 3. Check Stacking Violation
+        if order.discount_code is not None:
+            raise DiscountValidationError(
+                DiscountStatus.STACKING_VIOLATION, 
+                "A discount code has already been applied to this order."
+            )
+
+        # 4. Validate Code against Promotion Rules
+        validation_result = PromotionEngine.validate(code=clean_code, order_subtotal=order.subtotal)
+        
+        if not validation_result.is_valid:
+            raise DiscountValidationError(
+                validation_result.status_code, 
+                validation_result.reason
+            )
+
+        # 5. Apply and Persist (Transactionally with OCC)
+        try:
+            # Update domain state
+            order.apply_discount_internal(
+                code=clean_code,
+                amount=validation_result.discount_amount,
+                percentage=validation_result.percentage
+            )
+            
+            # Recalculate total
+            order.total = order.subtotal - validation_result.discount_amount
+            
+            # flush() generates the UPDATE statement with WHERE version = :old_version
+            self.db.flush() 
+            
+        except StaleDataError as e:
+            # Catch specific SQLAlchemy exception for concurrency conflicts
+            raise ConcurrencyError(
+                DiscountStatus.OPTIMISTIC_LOCK_CONFLICT, 
+                "Order details changed during processing. Please refresh."
+            )
+        except Exception as e:
+            self.db.rollback()
+            raise
+
+        # If flush succeeded, the version was updated atomically
+        self.db.commit()
+
+        return {
+            "status": "success",
+            "discount_code": order.discount_code,
+            "discount_amount": float(order.discount_amount),
+            "discount_percentage": order.discount_percentage, 
+            "new_total": float(order.total)
+        }
+
+    def _is_valid_format(self, code: str) -> bool:
+        # Allow uppercase letters, digits, underscores, and hyphens
+        return bool(re.match(r'^[A-Z0-9_-]+$', code))
+```

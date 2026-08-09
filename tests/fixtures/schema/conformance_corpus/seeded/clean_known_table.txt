@@ -1,0 +1,28 @@
+Here is the implementation.
+
+```python
+from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import Column, Text, Integer
+from .base import Base
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Text, primary_key=True)
+    email = Column(Text, nullable=False)
+    display_name = Column(Text)
+    created_at = Column(Text, nullable=False)
+
+
+class UserRepository:
+    def __init__(self, session):
+        self.session = session
+
+    def get_by_email(self, email: str):
+        return self.session.query(User).filter(User.email == email).first()
+
+    def touch_display_name(self, user, name):
+        user.display_name = name
+        return user
+```

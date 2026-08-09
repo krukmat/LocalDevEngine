@@ -1,0 +1,229 @@
+Here are the implementation blocks for adding the `due_date` field to the Task entity, strictly adhering to the ORM/Pydantic separation principles outlined in the architecture plan.
+
+### 1. Database Layer (`app/database/models/task.py`)
+
+```python
+import uuid
+from datetime import datetime
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Boolean
+from sqlalchemy.orm import relationship, declarative_base
+from app.database.base import Base # Assuming a base class definition exists in your project structure
+
+class Task(Base):
+    __tablename__ = "tasks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    uuid = Column(String, unique=True, index=True, default=lambda: str(uuid.uuid4()))
+    title = Column(String, nullable=False, index=True)
+    description = Column(String, nullable=True)
+    
+    # NEW FIELD: Due Date
+    due_date = Column(DateTime, nullable=True)
+
+    is_active = Column(Boolean, default=True)
+    owner_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    assigned_to_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    owner = relationship("User", foreign_keys=[owner_id], back_populates="tasks")
+    assignee = relationship("User", foreign_keys=[assigned_to_id])
+```
+
+### 2. API Layer (`app/schemas/task.py`)
+
+```python
+from pydantic import BaseModel, Field
+from datetime import datetime
+from typing import Optional
+
+# Input Schema: Create a task
+class TaskCreate(BaseModel):
+    title: str = Field(..., min_length=1, max_length=255)
+    description: Optional[str] = None
+    due_date: Optional[datetime] = None  # Accepts ISO-8601 strings or null
+
+# Input Schema: Update a task (Partial updates supported via exclude_unset=True in service)
+class TaskUpdate(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=1, max_length=255, exclude_unset=True)
+    description: Optional[str] = Field(default=None, exclude_unset=True)
+    
+    due_date: Optional[datetime] = Field(default=None, exclude_unset=True)
+    
+    is_active: Optional[bool] = Field(default=None, exclude_unset=True)
+
+# Output Schema: Response to client
+class TaskResponse(BaseModel):
+    id: int
+    uuid: str
+    title: str
+    description: Optional[str]
+    due_date: Optional[datetime] = None
+    is_active: bool
+    owner_id: int
+    assigned_to_id: Optional[int] = None
+    
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True  # Enables ORM mode for Pydantic v2
+```
+
+### 3. Application Models & Validation (`app/services/task_service.py`)
+
+```python
+from fastapi import HTTPException, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.database.models.task import Task  # ORM Model
+from app.schemas.task import TaskCreate, TaskUpdate, TaskResponse
+
+class TaskService:
+    def __init__(self):
+        pass
+
+    async def create_task(self, db: AsyncSession, task_in: TaskCreate) -> Task:
+        """Creates a new Task entity in the database."""
+        # Logic to determine owner_id usually comes from auth context, passed via db or separate arg
+        # For this block, assuming owner_id is handled by the router passing it to the service or schema.
+        # Here we assume the caller passes necessary context or task_in includes it if needed.
+        
+        new_task = Task(**task_in.model_dump())
+        db.add(new_task)
+        await db.commit()
+        await db.refresh(new_task)
+        return new_task
+
+    async def update_task(
+        self, 
+        db: AsyncSession, 
+        task_id: int, 
+        task_in: TaskUpdate
+    ) -> Task:
+        """
+        Updates an existing Task entity.
+        Uses exclude_unset=True to handle partial updates correctly.
+        """
+        # 1. Fetch the existing ORM entity
+        db_task = await db.get(Task, task_id)
+        if not db_task:
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        # 2. Extract only the fields explicitly set by the client
+        update_data = task_in.model_dump(exclude_unset=True)
+        
+        # Update the ORM object attributes
+        for key, value in update_data.items():
+            setattr(db_task, key, value)
+
+        # 3. Commit and Refresh
+        await db.commit()
+        await db.refresh(db_task)
+        
+        return db_task
+
+    async def get_task(self, db: AsyncSession, task_id: int) -> Task:
+        """Fetches a single task by ID."""
+        task = await db.get(Task, task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        return task
+
+    async def list_tasks(self, db: AsyncSession, skip: int = 0, limit: int = 100) -> list[Task]:
+        """Lists tasks with pagination."""
+        tasks = await db.execute(
+            Task.__table__.select().offset(skip).limit(limit)
+        )
+        return tasks.scalars().all()
+```
+
+### 4. API/Interface (`app/api/tasks.py`)
+
+```python
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.database.dependencies import get_db
+from app.schemas.task import TaskCreate, TaskUpdate, TaskResponse
+from app.services.task_service import TaskService
+
+router = APIRouter(prefix="/tasks", tags=["tasks"])
+
+def get_task_service() -> TaskService:
+    return TaskService()
+
+@router.post("/", response_model=TaskResponse)
+async def create_task(
+    task_in: TaskCreate, 
+    db: AsyncSession = Depends(get_db),
+    service: TaskService = Depends(get_task_service)
+):
+    """
+    Create a new task.
+    Note: owner_id should typically be injected from JWT/Session context.
+    For this implementation, we assume the schema or service handles it 
+    (e.g., if task_in had owner_id, or service extracts it from security context).
+    """
+    # In a real app, you'd likely extract current_user.id here
+    # new_task_data = task_in.model_dump()
+    # new_task_data['owner_id'] = current_user.id
+    
+    created_task = await service.create_task(db, task_in)
+    return created_task
+
+@router.patch("/{task_id}", response_model=TaskResponse)
+async def update_task(
+    task_id: int, 
+    task_in: TaskUpdate, 
+    db: AsyncSession = Depends(get_db),
+    service: TaskService = Depends(get_task_service)
+):
+    """
+    Update an existing task.
+    Sends only changed fields in the body; omitted fields are ignored.
+    To clear due_date, send {"due_date": null}.
+    """
+    updated_task = await service.update_task(db, task_id, task_in)
+    return updated_task
+
+@router.get("/{task_id}", response_model=TaskResponse)
+async def get_task(
+    task_id: int, 
+    db: AsyncSession = Depends(get_db),
+    service: TaskService = Depends(get_task_service)
+):
+    """Retrieve a specific task by ID."""
+    task = await service.get_task(db, task_id)
+    return task
+
+@router.get("/", response_model=list[TaskResponse])
+async def list_tasks(
+    skip: int = 0, 
+    limit: int = 100,
+    db: AsyncSession = Depends(get_db),
+    service: TaskService = Depends(get_task_service)
+):
+    """Retrieve a list of tasks with pagination."""
+    tasks = await service.list_tasks(db, skip=skip, limit=limit)
+    return tasks
+```
+
+### 5. Database Migration Note
+
+You must generate and apply a migration to add the `due_date` column to your existing database schema.
+
+**Alembic Example:**
+```bash
+alembic revision --autogenerate -m "add due_date field to tasks"
+alembic upgrade head
+```
+
+The generated Python migration script should contain:
+```python
+def upgrade():
+    op.add_column('tasks', sa.Column('due_date', sa.DateTime(), nullable=True))
+
+def downgrade():
+    op.drop_column('tasks', 'due_date')
+```

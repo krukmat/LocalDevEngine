@@ -1,10 +1,21 @@
 # Plan — Schema Conformance (redefinición de alcance de la capa de schema)
 
-**Estado:** propuesta de alcance. Ningún código escrito todavía.
+**Estado:** **C.1–C.6 completos.** El verificador está construido, su gate (§6) pasó (0 falsos
+positivos, 100% de detección sobre un corpus de 22 casos), y está wireado en el recibo en modo
+`report`. Detalle de cada tarea en §8.2. C.7 (`enforce`) sigue diferido, sin cambios respecto de
+lo decidido en §8.3.
 **Reemplaza el alcance de:** [docs/plan-schema-grounding.md](plan-schema-grounding.md) §5.3
 (Fase 4), que queda cerrada y sustituida por este documento.
 **Origen:** el NO-GO de la Fase 3 ([docs/fase3-decision.md](fase3-decision.md)) no invalidó la
 idea de la capa — invalidó su *mecanismo*. Este documento cambia el mecanismo.
+
+**Decisiones tomadas por el dueño del repo (2026-08-09):**
+1. **Parser SQL: no por ahora.** El verificador arranca solo con Python (`ast` de stdlib, cero
+   dependencias nuevas). Ver §5 para la decisión completa y su condición de reapertura.
+2. **`allow_new_objects: true` por defecto.** Ver §4.
+3. **Cobertura de patrones inicial: SQLAlchemy declarativo.** Ver §2.4 — es una decisión
+   distinta de la del modelo de datos (que sigue siendo 100% genérico vía `SchemaSnapshot`) y
+   quedaba implícita en versiones anteriores de este documento; ahora está explícita.
 
 ---
 
@@ -75,7 +86,7 @@ regex adicional lo arregla; cada parche agranda la blocklist y deja el agujero s
 |---|---|---|
 | A | Carga/normalización/selección/render del snapshot | Ya existe, ya es determinístico — se conserva sin cambios |
 | B | **Segmentación de la salida en regiones tipadas** (bloques de código con lenguaje declarado). La prosa nunca se analiza | Puro parsing de texto |
-| C | **Extracción por AST**, no por regex: SQL con parser SQL real; Python con `ast` de stdlib | Parser, no heurística |
+| C | **Extracción por AST**, no por regex: Python con `ast` de stdlib. SQL diferido (§5) | Parser, no heurística |
 | D | **Tabla de símbolos: definiciones vs. referencias**, construida recorriendo la salida en orden | Función pura |
 | E | **Reporte de conformidad tipado** (§3), reemplaza al `unknown_count` escalar | Función pura |
 | F | **Gate determinístico + reintento acotado** con la lista de violaciones como feedback (§4) | Regla fija; el reintento usa modelo, la *decisión* no |
@@ -102,6 +113,42 @@ regex adicional lo arregla; cada parche agranda la blocklist y deja el agujero s
 - El header de autoridad **no se elimina, se degrada de rango**: pasa de ser *el mecanismo* a
   ser una optimización que reduce la cantidad de reintentos. Su valor ahora es medible barato
   (reintentos con vs. sin bloque), que es justo lo que la Fase 3 no pudo medir.
+
+### 2.4 Cobertura de patrones — el modelo de datos es genérico, el reconocimiento de código no (todavía)
+
+Dos genericidades distintas, y conviene no confundirlas:
+
+- **El modelo de datos (schema) es 100% genérico** y no cambia con este plan: el
+  `SchemaSnapshot` lo define el llamador vía `--schema-file`; ninguna tabla/columna de las
+  fixtures (`Cliente`, `orders`, `tasks`, `products`) está hardcodeada en ningún componente. El
+  verificador camina el snapshot que reciba, sea cual sea el dominio.
+- **El reconocimiento de patrones de código no es genérico por default, y no puede serlo sin
+  costo.** `ast` da el árbol sintáctico; no sabe qué nodo "es una referencia a una tabla" sin un
+  conjunto de patrones enseñado explícitamente. Los 18 recibos de la Fase 3 — la única evidencia
+  real disponible — se distribuyen así por stack de acceso a datos: **5 usan SQLAlchemy
+  declarativo, 2 usan `psycopg2` crudo, 8 no muestran código de acceso a datos detectable
+  (fast path, respuestas puramente explicativas, u otro foco), y 3 no llegaron a producir
+  implementación** (`status=failed`/`timeout`). SQLAlchemy no es "casi todo el corpus" — es el
+  stack dominante *entre los identificables* (5 contra 2), pero la muestra orgánica es angosta:
+  5 casos, no 18.
+
+**Alcance inicial, explícito:** el extractor de Python reconoce patrones **SQLAlchemy
+declarativo** (`__tablename__ = "..."`, `Column(...)`/`mapped_column(...)`,
+`.query(Model).filter(...)`, `select(Model)`). Es el ORM Python más común y, aunque la evidencia
+orgánica es angosta (5 recibos), es la única señal real disponible y gana 5-a-2 entre los stacks
+identificables. Cualquier otro acceso a datos — `psycopg2`/`sqlite3` con queries crudas, Django
+ORM, `peewee`, `tortoise-orm` — no matchea ningún patrón conocido y cae en
+`UNPARSEABLE_REGION`/`UNTYPED_REGION` (§3): **reportado como no verificado, nunca aceptado en
+silencio.** Esa es la salvaguarda que hace que la cobertura angosta sea honesta en vez de un
+agujero — el mismo principio del §3 aplicado a la elección de qué frameworks se reconocen, no
+solo a qué falla el parseo. Consecuencia directa de la muestra angosta: **C.1 debe sembrar casos
+SQLAlchemy además de extraer los 5 orgánicos**, para que el corpus no dependa de una evidencia
+tan chica.
+
+Ampliar la cobertura (sumar un patrón para otro ORM) es incremental y no bloqueante: cada
+patrón nuevo se mide reduciendo la tasa de `UNPARSEABLE_REGION` del gate (§6), en vez de
+asumirse. No es parte de C.1–C.6; es la extensión natural una vez que haya evidencia de qué
+stacks produce el Implementer en la práctica.
 
 ---
 
@@ -144,33 +191,52 @@ Dos perillas ortogonales, ambas inertes si no se pasa `--schema-file`:
     `max_conformance_retries`. Si no converge: el run termina con estado explícito de no
     conformidad y el reporte completo. Nunca un `qa_approved: true` encima de una referencia
     rota.
-- `allow_new_objects: true | false` (default `true`)
+- `allow_new_objects: true | false` (default **`true`, decidido**)
   - Controla si `NEW_OBJECT_DEFINED` es violación. Default `true` porque crear una tabla es
     ingeniería legítima — en el caso `discount_codes` la corrida sin schema resolvió con
     columnas sobre `orders` y la corrida con schema normalizó a tabla aparte; **ninguna de las
     dos es incorrecta en abstracto**. Un llamador con un schema cerrado pone `false`.
+  - **Impacto real, para que quede explícito:** en `report` (el único modo que C.1–C.6
+    construye) este knob solo cambia si `NEW_OBJECT_DEFINED` aparece listado en el reporte —
+    nada bloquea todavía. Empieza a importar cuando (si) se construya `enforce` (C.7): ahí un
+    `false` haría que cualquier "agregá una columna" dispare el loop de reintento como si fuera
+    una alucinación. Con `enforce` diferido, esta decisión no tiene efecto operativo hoy;
+    queda fijada para no tener que revisitarla cuando C.7 se retome.
 
 El reintento usa el modelo; **la decisión de reintentar, no**. El estado terminal es siempre
 uno de dos valores computables por el llamador.
 
 ---
 
-## 5. Decisión de dependencia
+## 5. Decisión de dependencia — **resuelta: `ast` solo, `sqlglot` diferido**
 
-Parsear SQL a mano reproduce la clase de bug que estamos eliminando. Se necesita un parser
-real:
+Parsear SQL a mano reproduce la clase de bug que estamos eliminando, así que la alternativa a
+un parser real nunca fue "regex para SQL" — fue no cubrir SQL todavía:
 
-- **Python:** `ast` de stdlib. Sin dependencia nueva.
-- **SQL:** recomiendo **`sqlglot`** — Python puro (sin binarios ni C), y *dialect-aware*, que
-  encaja con el campo `dialect` que el snapshot ya transporta (`postgres`, `mysql` en las
-  fixtures actuales).
+- **Python:** `ast` de stdlib. Sin dependencia nueva. **Construido en C.1–C.6.**
+- **SQL:** requeriría `sqlglot` (Python puro, *dialect-aware*, encaja con el campo `dialect`
+  que el snapshot ya transporta). **No se construye por ahora.**
 
-Es la cuarta dependencia de un repo que hoy tiene tres ([requirements.txt](../requirements.txt):
-`httpx`, `numpy`, `PyYAML`), y el minimalismo acá es un valor explícito. La contrapartida es
-concreta: sin parser SQL real, la única alternativa honesta es marcar toda región SQL como
-`UNPARSEABLE_REGION`, que degrada la capa a "solo verifica ORM en Python". **Es una decisión
-del dueño del repo, no mía** — el diseño funciona con cualquiera de las dos, con distinto
-alcance de cobertura.
+**Motivo de la decisión, basado en la evidencia de los 18 recibos, no en preferencia por
+minimalismo:** los 2 únicos eventos de invención genuinos encontrados en la Fase 3
+(`Cliente.id`, `discount_codes` — ver [fase3-decision.md](fase3-decision.md)) son ambos
+construcciones Python/ORM, ninguno SQL crudo. `sqlglot` no habría atrapado ninguno de los dos.
+SQL crudo aparece en 7 de 18 recibos (~39%), pero mayormente dentro de scripts de migración o
+bloques explicativos — sin evidencia de que esa superficie contenga invención real, porque el
+instrumento roto nunca permitió verlo con confianza. El costo de `sqlglot` (dependencia nueva +
+extracción confiable de texto SQL desde markdown/f-strings antes de poder parsearlo) es bajo
+pero no nulo, y el beneficio medido sobre la evidencia disponible es **cero**.
+
+**Consecuencia inmediata:** toda región de código declarada como SQL cae en
+`UNPARSEABLE_REGION` (§3) — reportada, nunca verificada, nunca aceptada en silencio. Esto reduce
+el alcance de la capa a "verifica ORM/acceso a datos en Python", igual que si se hubiera elegido
+por minimalismo, pero la razón registrada es la evidencia, no la preferencia.
+
+**Condición de reapertura:** una vez que el gate del §6 corra, va a producir por primera vez un
+número real de qué porcentaje del corpus cae en `UNPARSEABLE_REGION` por ser SQL. Si ese número
+es alto y sostenido en corpus futuro, `sqlglot` se reconsidera con datos en vez de con
+expectativa. No hay una fecha fijada para revisar esto — es un trigger por evidencia, no por
+calendario.
 
 ---
 
@@ -239,36 +305,59 @@ reducir ambas cosas a un número comparable.
 
 ---
 
-## 8. Orden de trabajo propuesto
+## 8. Orden de trabajo
 
-| # | Tarea | Depende de |
-|---|---|---|
-| C.0 | Decisión sobre `sqlglot` (§5) | dueño del repo |
-| C.1 | Corpus etiquetado a mano desde los 18 recibos existentes + casos sembrados | — |
-| C.2 | Segmentación en regiones tipadas (B) | — |
-| C.3 | Extractores por AST: Python (`ast`) y SQL | C.0, C.2 |
-| C.4 | Tabla de símbolos + reporte tipado (D, E) | C.3 |
-| C.5 | Correr el gate de §6 contra C.1 | C.1, C.4 |
-| C.6 | Wiring en el recibo, reemplazando `identifier_check` | C.5 = positivo |
-| C.7 | `enforce` + reintento acotado (§4) | C.6 **+ forma del pipeline definida** (ver abajo) |
+### 8.1 Grafo de dependencias
 
-C.1 a C.5 son **enteramente offline**: sin Ollama, sin esperas de 25 minutos, testeables en
-milisegundos. Esa es la diferencia práctica más grande respecto del alcance anterior — el ciclo
-de validación pasa de una tarde de máquina a una corrida de tests.
+```
+C.0 (decisión de parsers)  ── RESUELTO §5
+C.1 (corpus)  ─┐
+C.2 (regiones) ─┼─→ C.3 (extractor Python/ast) ─→ C.4 (símbolos + reporte) ─┐
+                │                                                            ├─→ C.5 (gate §6) ─→ C.6 (wiring recibo) ─┬─→ C.7 (enforce)
+                └────────────────────────────────────────────────────────── C.1 ──────────────────┘                    │
+                                                                                          forma del pipeline BA/Broker ─┘
+```
 
-**Corte por acoplamiento (consecuencia de §7).** El trabajo se parte en dos mitades con riesgos
-distintos:
+C.1 y C.2 no dependen entre sí ni de nada — arrancan en paralelo. C.7 tiene una segunda
+dependencia externa a este plan (ver 8.3).
+
+### 8.2 Tareas
+
+| # | Tarea | Depende de | Entregable | Estado |
+|---|---|---|---|---|
+| C.0 | Decisión de alcance de parsers | — | Este documento, §5 | ✅ **Resuelto** — `ast` solo, `sqlglot` diferido |
+| C.1 | Corpus etiquetado a mano: `(código, snapshot, violaciones_esperadas)` desde los 18 recibos de Fase 3 + casos sembrados, incluyendo los 2 eventos genuinos (`Cliente.id`, `discount_codes`) como casos con resultado esperado conocido | — | `tests/fixtures/schema/conformance_corpus/` (15 casos orgánicos + 7 sembrados, `labels.json`) | ✅ **Completo** |
+| C.2 | Segmentación de la salida del Implementer en regiones tipadas (bloques de código con lenguaje declarado vs. prosa) | — | `context/schema/segmentation.py` — `segment(text) -> list[Region]` | ✅ **Completo** |
+| C.3 | Extractor por AST para Python: reconoce patrones SQLAlchemy declarativo (§2.4); toda región SQL se tipa `UNPARSEABLE_REGION` sin intentar parsear | C.2 | `context/schema/extraction.py` — `extract_python`/`extract_document(region) -> list[Definition \| Reference] \| ParseFailure` | ✅ **Completo** |
+| C.4 | Tabla de símbolos (definiciones vs. referencias, resuelta en orden) + reporte de conformidad tipado (§3) | C.3 | `context/schema/conformance.py` — `check(implementation, snapshot, allow_new_objects) -> ConformanceReport` | ✅ **Completo** |
+| C.5 | Correr el gate de §6 contra el corpus de C.1 | C.1, C.4 | `tests/run_conformance_gate.py` — **PASS: 0 falsos positivos, 100% detección sobre 22 casos** | ✅ **Completo — gate pasado** |
+| C.6 | Wiring en el recibo: reemplaza `outcome.schema_grounding.identifier_check` por el reporte de C.4; actualiza `docs/handoff-fenix-parte-b.md` y `CLAUDE.md` con el contrato nuevo | C.5 = gate pasado | `core/orchestrator.py` (`outcome.schema_grounding.conformance_check`), `core/receipt.py` (`config_fingerprint.schema_grounding.allow_new_objects`), `context/schema/__init__.py`, `config/settings.yaml`, docs de interfaz actualizados | ✅ **Completo** |
+| C.7 | `schema_mode: enforce` + reintento acotado (§4) | C.6 **y** forma del pipeline BA/Broker definida (8.3) | — | 🔒 Diferido, fuera de este alcance |
+
+**C.1–C.5 son enteramente offline**: sin Ollama, sin esperas de ~25 min por corrida, testeables
+en milisegundos. Es la diferencia práctica más grande respecto del alcance anterior — el ciclo
+de validación pasa de "una tarde de máquina" (Fase 3) a una corrida de tests.
+
+**Si C.5 no pasa** (el gate del §6 exige 0 falsos positivos y 100% de detección): C.6 no se
+hace, la capa se documenta en el estado que haya alcanzado, y se registra qué violaciones
+concretas causaron la falla — mismo estándar de rigor que cerró la Fase 3.
+
+### 8.3 Corte por acoplamiento (consecuencia de §7)
+
+El trabajo se parte en dos mitades con riesgos distintos:
 
 - **C.1–C.6 — el verificador:** función pura, offline, sin acoplamiento con el flujo del
   pipeline. Es estable pase lo que pase con el Broker, el BA o el RFM, y además los habilita
-  (§7.2). **Se puede hacer ahora.**
+  (§7.2) al ser el instrumento de medición de ese programa. **Se puede hacer ahora.**
 - **C.7 — `enforce`:** toca el lazo QA ↔ Implementer, que es precisamente lo que la
   arquitectura objetivo reestructura al insertar la etapa Analyst/BA. Construirlo antes de que
   esa forma se defina es construir contra un blanco móvil. **Se difiere**, sin bloquear nada:
-  en modo `report` la señal ya queda disponible y medible.
+  en modo `report` la señal ya queda disponible y medible para cualquier caller, incluido fenix.
 
-**Nota de reusabilidad (del handoff §2):** el corpus y el runner de C.1/C.5 deben construirse
-como *extractor de métricas por recibo con variantes parametrizables*, no como un script de un
-número — es la misma recomendación que el handoff le hace a la tarea 3.3, y por el mismo
-motivo: si cada pieza siguiente (BA, Broker, RFM) tiene que rehacer el harness, las mediciones
-no van a ser comparables entre sí, que es lo que vuelve inútil un A/B/C/D.
+### 8.4 Nota de reusabilidad (del handoff §2)
+
+El corpus y el runner de C.1/C.5 deben construirse como *extractor de métricas por recibo con
+variantes parametrizables*, no como un script de un número — misma recomendación que el handoff
+le hace a la tarea 3.3 de Fase 3, y por el mismo motivo: si cada pieza siguiente (BA, Broker,
+RFM) tiene que rehacer el harness, las mediciones no van a ser comparables entre sí, que es lo
+que vuelve inútil un experimento A/B/C/D.

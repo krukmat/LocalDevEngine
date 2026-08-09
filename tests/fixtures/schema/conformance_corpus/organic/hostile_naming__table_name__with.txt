@@ -1,0 +1,207 @@
+```python
+# -----------------------------------------------------------------------------
+# 1. Validation Layer: `cliente_validators.py`
+# -----------------------------------------------------------------------------
+
+import re
+from typing import Optional
+
+class ClienteValidator:
+    """
+    Validates client data fields, specifically the new phone number column.
+    """
+    # E.164 Standard compliant regex: Starts with +, followed by digits. 
+    # Allows for lengths up to 20 chars (standard max for E.164).
+    PHONE_REGEX = re.compile(r'^\+?[1-9]\d{1,14}$') 
+    
+    @staticmethod
+    def validate_phone_number(phone: Optional[str]) -> bool:
+        """
+        Validates the phone number format.
+        
+        Args:
+            phone: The phone string to validate. Can be None.
+            
+        Returns:
+            True if valid or None, False otherwise.
+        """
+        if phone is None or phone.strip() == '':
+            return True  # Nullable field allows empty/null
+            
+        # Use the constant instead of hardcoded string
+        return bool(ClienteValidator.PHONE_REGEX.match(phone))
+
+
+# -----------------------------------------------------------------------------
+# 2. Schema Definition Update: `models/cliente.py` (Pydantic Examples)
+# -----------------------------------------------------------------------------
+
+from pydantic import BaseModel, Field
+from typing import Optional
+
+class ClienteCreate(BaseModel):
+    """Schema for creating a new client."""
+    nombre_completo: str = Field(..., min_length=1, max_length=255)
+    correo_electronico: Optional[str] = Field(None, max_length=255)
+    telefono: Optional[str] = Field(None, description="Phone number in E.164 format or None")
+
+class ClienteUpdate(BaseModel):
+    """Schema for partially updating an existing client."""
+    nombre_completo: Optional[str] = Field(None, min_length=1, max_length=255)
+    correo_electronico: Optional[str] = Field(None, max_length=255)
+    telefono: Optional[str] = Field(None, description="Phone number in E.164 format or None")
+
+
+# -----------------------------------------------------------------------------
+# 3. Data Access Layer (DAL): `cliente_repository.py`
+# -----------------------------------------------------------------------------
+
+import logging
+from typing import Dict, Any, Optional
+
+logger = logging.getLogger(__name__)
+
+# Sentinel object to detect missing arguments for partial updates
+_UNSET = object()
+
+class ClienteRepository:
+    """
+    Repository pattern implementation for interacting with the Cliente table.
+    Includes logic for adding the 'telefono' column safely via migration.
+    """
+
+    def __init__(self, db_connection_manager):
+        self.conn = db_connection_manager
+    
+    def add_telefono_column_if_missing(self) -> bool:
+        """
+        Step 1: Database Migration Strategy.
+        Safely adds the 'telefono' column if it does not already exist.
+        
+        Returns:
+            True if migration was applied or skipped (idempotent), False on error.
+        """
+        try:
+            with self.conn.get_cursor() as cursor:
+                # Check for column existence
+                cursor.execute("""
+                    SELECT COUNT(*) 
+                    FROM information_schema.columns 
+                    WHERE table_name = 'Cliente' AND column_name = 'telefono';
+                """)
+                count = cursor.fetchone()[0]
+                
+                if count == 0:
+                    # Add column without default to preserve existing rows as NULL
+                    # Using ALGORITHM=INPLACE, LOCK=NONE for MySQL 8.0+ compatibility
+                    migration_sql = """
+                        ALTER TABLE Cliente 
+                        ADD COLUMN telefono VARCHAR(20) NULL;
+                    """
+                    cursor.execute(migration_sql)
+                    logger.info("Added 'telefono' column to Cliente table.")
+                    return True
+                else:
+                    logger.debug("'telefono' column already exists in Cliente table.")
+                    return True
+                    
+        except Exception as e:
+            logger.error(f"Failed to ensure 'telefono' column existence: {e}")
+            raise # Re-raise to let caller handle transaction rollback/commit
+    
+    def get_cliente_by_id(self, client_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Step 2.2: Retrieve a client by ID, including the new 'telefono' column.
+        """
+        query = """
+            SELECT 
+                id_cliente, 
+                nombre_completo, 
+                correo_electronico, 
+                telefono
+            FROM Cliente 
+            WHERE id_cliente = %s
+        """
+        
+        try:
+            with self.conn.get_cursor() as cursor:
+                cursor.execute(query, (client_id,))
+                row = cursor.fetchone()
+                
+                if row:
+                    return {
+                        'id_cliente': row[0],
+                        'nombre_completo': row[1],
+                        'correo_electronico': row[2],
+                        'telefono': row[3]  # Returns None if not set
+                    }
+                return None
+        except Exception as e:
+            logger.error(f"Failed to get cliente by ID {client_id}: {e}")
+            raise
+
+    def update_cliente(self, client_id: int, **kwargs) -> bool:
+        """
+        Step 2.1: Fix partial update logic using **kwargs.
+        
+        Args:
+            client_id: The ID of the client to update.
+            **kwargs: Fields to update. Only provided fields will be updated.
+                     Pass {field: None} to explicitly set NULL.
+                     Omit field to leave it unchanged.
+                     
+        Returns:
+            True if update was successful, False otherwise.
+        """
+        # Define allowed fields based on current schema + new column
+        valid_fields = {'nombre_completo', 'correo_electronico', 'telefono'}
+        
+        # Filter out invalid fields passed by caller
+        updates = {k: v for k, v in kwargs.items() if k in valid_fields}
+        
+        if not updates:
+            logger.debug(f"No valid fields provided for update of cliente {client_id}.")
+            return True  # Nothing to update counts as success
+            
+        # Build dynamic SQL with parameterized queries to prevent injection
+        set_clause = ", ".join([f"{key} = %s" for key in updates.keys()])
+        values = list(updates.values())
+        values.append(client_id)
+        
+        query = f"""
+            UPDATE Cliente 
+            SET {set_clause} 
+            WHERE id_cliente = %s
+        """
+        
+        try:
+            with self.conn.get_cursor() as cursor:
+                cursor.execute(query, tuple(values))
+                affected_rows = cursor.rowcount
+                success = affected_rows > 0
+                
+                if not success:
+                    logger.warning(f"No cliente found with ID {client_id} for update.")
+                    
+                return success
+                
+        except Exception as e:
+            logger.error(f"Failed to update cliente {client_id}: {e}")
+            raise
+
+    def create_cliente(self, nombre_completo: str, correo_electronico: Optional[str] = None, telefono: Optional[str] = None) -> int:
+        """
+        Helper method to insert a new client. Ensures 'telefono' is handled correctly.
+        """
+        query = """
+            INSERT INTO Cliente (nombre_completo, correo_electronico, telefono)
+            VALUES (%s, %s, %s)
+        """
+        try:
+            with self.conn.get_cursor() as cursor:
+                cursor.execute(query, (nombre_completo, correo_electronico, telefono))
+                return cursor.lastrowid
+        except Exception as e:
+            logger.error(f"Failed to create cliente: {e}")
+            raise
+```

@@ -1,0 +1,264 @@
+Here is the implementation for adding the `phone_number` field to the `Cliente` entity, including ORM updates, DTOs with validation, and service-layer error handling.
+
+### 1. Data Model (SQLAlchemy)
+
+Update your SQLAlchemy model definition for `Cliente`. Ensure `phone_number` is nullable to allow transitional data entry without breaking existing records.
+
+```python
+# models/cliente.py
+from sqlalchemy import Column, String
+from sqlalchemy.orm import Mapped, mapped_column
+from typing import Optional
+from datetime import datetime
+
+# Assuming you have a base model defined elsewhere, e.g., BaseModel or DeclarativeBase
+from database.base import BaseModel 
+
+class Cliente(BaseModel):
+    __tablename__ = "clientes"
+
+    # ... existing fields (id, name, email, etc.) ...
+
+    phone_number: Mapped[Optional[str]] = mapped_column(
+        String(20),  # VARCHAR(20) limit to support international formats like +1 555-0199
+        nullable=True, 
+        index=False, # Index only if frequently searched; otherwise leave for flexibility
+        default=None
+    )
+
+    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<Cliente(name='{self.name}', phone='{self.phone_number}')>"
+```
+
+### 2. Database Migration (Alembic Example)
+
+If using Alembic, this script would be generated automatically. However, the explicit logic is:
+
+```python
+# migrations/versions/xxxx_add_phone_number_to_cliente.py
+"""add phone number to cliente
+
+Revision ID: xxxxx
+Revises: yyyy
+Create Date: 2023-10-27
+"""
+from alembic import op
+import sqlalchemy as sa
+
+revision = 'xxxxx'
+down_revision = 'yyyyy'
+
+def upgrade():
+    # Add column with nullable=True to prevent data loss for existing rows
+    op.add_column('clientes', sa.Column('phone_number', sa.String(20), nullable=True))
+
+def downgrade():
+    op.drop_column('clientes', 'phone_number')
+```
+
+### 3. DTOs and Validation (Pydantic)
+
+Implement strict validation using Pydantic V2 style (assuming modern setup). Use a custom validator to ensure basic sanity before persistence.
+
+```python
+# schemas/cliente.py
+from pydantic import BaseModel, Field, field_validator, ConfigDict
+from typing import Optional
+import re
+
+# Regex for basic phone number validation: 
+# Allows optional start with '+', digits, spaces, dashes, parentheses.
+PHONE_REGEX = re.compile(r'^\+?[\d\s\-()]+$')
+
+class ClienteBaseDTO(BaseModel):
+    name: str = Field(..., min_length=1)
+    email: Optional[str] = None
+    
+    # New field definition
+    phone_number: Optional[str] = Field(
+        default=None, 
+        max_length=20,
+        description="International phone number format (e.g., +1 555-0199)"
+    )
+
+class CreateClienteDTO(ClienteBaseDTO):
+    model_config = ConfigDict(extra='forbid')
+
+    @field_validator('phone_number')
+    def validate_phone_number(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        
+        # Strip whitespace for validation but keep original for storage? 
+        # Plan says "fall back to raw input" on sanitization failure, so we keep it simple.
+        if not PHONE_REGEX.match(v):
+            raise ValueError('Phone number contains invalid characters.')
+        
+        # Optional: Ensure it has at least some digits
+        if not re.search(r'\d', v):
+            raise ValueError('Phone number must contain at least one digit.')
+            
+        return v
+
+class UpdateClienteDTO(ClienteBaseDTO):
+    model_config = ConfigDict(extra='forbid')
+    
+    # Note: In a PUT vs PATCH scenario, you might handle None differently.
+    # For now, we validate if provided.
+    
+    @field_validator('phone_number')
+    def validate_phone_number(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        if not PHONE_REGEX.match(v):
+            raise ValueError('Phone number contains invalid characters.')
+        return v
+
+class ClienteResponseDTO(ClienteBaseDTO):
+    id: int
+    created_at: str
+    updated_at: str
+    
+    # Ensure phone_number is present in JSON even if null, to prevent schema drift
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "id": 1,
+                "name": "John Doe",
+                "email": "john@example.com",
+                "phone_number": "+1 555-0199", # or null
+                "created_at": "2023-10-27T00:00:00",
+                "updated_at": "2023-10-27T00:00:00"
+            }
+        }
+```
+
+### 4. Service Layer with Error Handling
+
+Implement the service logic that handles persistence errors and logging.
+
+```python
+# services/cliente_service.py
+import logging
+from typing import Optional, List
+from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
+
+from models.cliente import Cliente
+from schemas.cliente import CreateClienteDTO, UpdateClienteDTO, ClienteResponseDTO
+
+logger = logging.getLogger(__name__)
+
+class ClienteServiceException(Exception):
+    """Custom exception for Client-related errors."""
+    def __init__(self, message: str, status_code: int = 500):
+        self.message = message
+        self.status_code = status_code
+        super().__init__(self.message)
+
+class ClienteService:
+    
+    @staticmethod
+    def create_cliente(db: Session, cliente_data: CreateClienteDTO) -> ClienteResponseDTO:
+        """
+        Creates a new client. Handles validation errors from ORM and persistence issues.
+        """
+        try:
+            # Map DTO to Model
+            db_cliente = Cliente(**cliente_data.model_dump())
+            
+            # Add to session
+            db.add(db_cliente)
+            db.commit()
+            db.refresh(db_cliente)
+            
+            logger.info(f"Created client {db_cliente.id} with phone number: {db_cliente.phone_number}")
+            return ClienteResponseDTO.model_validate(db_cliente)
+            
+        except IntegrityError as e:
+            # Handle unique constraint violations if any exist later (e.g., on email/phone uniqueness)
+            db.rollback()
+            logger.error(f"Integrity error creating client: {str(e)}")
+            raise ClienteServiceException(
+                "A resource with the provided data already exists.", 
+                status_code=409
+            ) from e
+            
+        except Exception as e:
+            db.rollback()
+            logger.exception(f"Unexpected error creating client: {str(e)}")
+            raise ClienteServiceException("Internal server error while creating client.") from e
+
+    @staticmethod
+    def update_cliente(db: Session, cliente_id: int, cliente_data: UpdateClienteDTO) -> Optional[ClienteResponseDTO]:
+        """
+        Updates an existing client.
+        """
+        db_cliente = db.query(Cliente).filter(Cliente.id == cliente_id).first()
+        
+        if not db_cliente:
+            return None
+
+        # Prepare update dict, handling optional fields gracefully
+        update_data = cliente_data.model_dump(exclude_unset=True)
+        
+        # Optional: Normalize phone number here if business logic dictates E.164 strictness
+        # For now, we rely on DTO validation. If normalization fails here, log warning.
+        if 'phone_number' in update_data and update_data['phone_number']:
+            try:
+                # Example: Simple normalization logic placeholder
+                normalized = update_data['phone_number'].replace(" ", "").replace("-", "")
+                # If normalization fails (e.g., too many digits), fallback to raw or null
+                if len(normalized) < 7: 
+                    logger.warning(f"Phone number for client {cliente_id} seems malformed after basic check. Storing raw.")
+            except Exception:
+                logger.warning(f"Phone normalization failed for client {cliente_id}. Keeping raw input.")
+
+        try:
+            for key, value in update_data.items():
+                setattr(db_cliente, key, value)
+            
+            db.commit()
+            db.refresh(db_cliente)
+            return ClienteResponseDTO.model_validate(db_cliente)
+            
+        except IntegrityError as e:
+            db.rollback()
+            logger.error(f"Integrity error updating client {cliente_id}: {str(e)}")
+            raise ClienteServiceException("Conflict while updating resource.") from e
+            
+    @staticmethod
+    def get_cliente(db: Session, cliente_id: int) -> Optional[ClienteResponseDTO]:
+        """Retrieves a single client by ID."""
+        db_cliente = db.query(Cliente).filter(Cliente.id == cliente_id).first()
+        if not db_cliente:
+            return None
+        return ClienteResponseDTO.model_validate(db_cliente)
+```
+
+### 5. Integration Hook (Optional/Deferred)
+
+If you need to trigger SMS/WhatsApp services, add this hook in your main API router or a post-save middleware to keep the service layer decoupled from external communication concerns.
+
+```python
+# api/hooks.py
+import asyncio
+import logging
+
+logger = logging.getLogger(__name__)
+
+async def trigger_post_save_hooks(cliente_id: int, phone_number: str):
+    """
+    Async hook to fire off SMS/WhatsApp events without blocking the DB commit.
+    Implement circuit breakers in the actual service call.
+    """
+    if not phone_number:
+        return
+    
+    # Example: Dispatch event or queue message
+    # await sms_service.send_welcome_sms(phone_number)
+    pass
+```

@@ -1,0 +1,284 @@
+```python
+import os
+import json
+import tempfile
+from typing import List, Dict, Any, Optional, Union
+from collections import defaultdict
+import numpy as np
+
+# Assuming VectorStoreError is defined in base.py or utils.py alongside BaseMemory
+# If not present, this ensures the name error won't crash if base.py imports it
+try:
+    from .base import BaseMemory, VectorStoreError  # type: ignore
+except ImportError:
+    from base import BaseMemory, VectorStoreError  # type: ignore
+
+class LocalVectorMemory(BaseMemory):
+    """
+    A lightweight local implementation of a Vector Store using NumPy.
+    Vectors are stored L2-normalized, so a plain dot product at query time
+    *is* cosine similarity — no per-query normalization cost.
+    Saves embeddings to a local file for persistence without heavy DB dependencies.
+    Designed for low VRAM/Disk usage on laptops.
+    """
+
+    def __init__(self, storage_dir: str, dimension: int):
+        self.storage_dir = storage_dir
+        self.index_path = os.path.join(storage_dir, "embeddings.npy")
+        self.metadata_path = os.path.join(storage_dir, "metadata.json")
+        self.dimension = dimension
+        self._vector_matrix: Optional[np.ndarray] = None
+        self._metadata: List[Dict[str, Any]] = []
+        
+        # New attribute for montoTotal inverted index
+        # Key: int (cents), Value: List[int] (row indices)
+        self._monto_index: Dict[int, List[int]] = defaultdict(list)
+
+        if not os.path.exists(storage_dir):
+            os.makedirs(storage_dir)
+
+        self._load()
+
+    def _load(self):
+        """Loads existing vectors and metadata from disk, validating consistency."""
+        index_exists = os.path.exists(self.index_path)
+        metadata_exists = os.path.exists(self.metadata_path)
+
+        if not index_exists and not metadata_exists:
+            return
+        if index_exists != metadata_exists:
+            raise VectorStoreError(
+                f"Vector store at {self.storage_dir!r} is incomplete: "
+                f"index present={index_exists}, metadata present={metadata_exists}. "
+                "Delete the .vector_store directory to rebuild from scratch."
+            )
+
+        matrix = np.load(self.index_path, allow_pickle=False)
+        with open(self.metadata_path, "r") as f:
+            metadata = json.load(f)
+
+        if matrix.ndim != 2:
+            raise VectorStoreError(f"Vector store index has unexpected shape {matrix.shape!r}")
+        if matrix.shape[0] != len(metadata):
+            raise VectorStoreError(
+                f"Vector store is out of sync: {matrix.shape[0]} vectors but "
+                f"{len(metadata)} metadata rows."
+            )
+        if matrix.shape[0] > 0 and matrix.shape[1] != self.dimension:
+            raise VectorStoreError(
+                f"Vector store dimension {matrix.shape[1]} does not match configured "
+                f"dimension {self.dimension}."
+            )
+
+        self._vector_matrix = matrix.astype(np.float32, copy=False)
+        self._metadata = metadata
+        
+        # Rebuild derived index from persistent metadata
+        self._rebuild_monto_index()
+
+    def _rebuild_monto_index(self):
+        """
+        Constructs the monto_total inverted index from current metadata.
+        Includes consistency validation to ensure no entries are missing or corrupted.
+        """
+        index: Dict[int, List[int]] = defaultdict(list)
+        valid_count = 0
+        
+        for idx, meta in enumerate(self._metadata):
+            monto_val = meta.get("montoTotal")
+            
+            # Skip if key doesn't exist or value is not a valid finite number
+            if monto_val is None:
+                continue
+            
+            try:
+                monto_float = float(monto_val)
+                if np.isnan(monto_float) or np.isinf(monto_float):
+                    continue
+            except (TypeError, ValueError):
+                continue
+
+            # Canonicalization: Convert to integer cents
+            key = round(monto_float * 100)
+            index[key].append(idx)
+            valid_count += 1
+
+        # Consistency Check: Ensure we indexed exactly as many items as exist in metadata with valid montoTotal
+        # Sum of lengths in the new index should equal the count of valid entries we just iterated over
+        if len(index) > 0:
+            total_indexed_entries = sum(len(v) for v in index.values())
+        else:
+            total_indexed_entries = 0
+            
+        if total_indexed_entries != valid_count:
+            raise VectorStoreError(
+                f"Monto index corruption detected. Indexed {total_indexed_entries} entries "
+                f"but found {valid_count} valid montoTotal values in metadata. "
+                "Delete the .vector_store directory to force a rebuild."
+            )
+            
+        self._monto_index = dict(index)  # Convert defaultdict to standard dict for cleaner API
+
+    def add_text(self, text: str, metadata: Dict[str, Any], embedding: List[float]) -> None:
+        """Stores a single pre-embedded piece of text."""
+        
+        # Determine the row index this new entry will occupy
+        row_idx = len(self._metadata)
+        
+        # Update primary data structures
+        self._metadata.append(metadata)
+        
+        # Pre-allocate or resize matrix if necessary, though typically we append rows
+        # For efficiency in this specific architecture, we might need to handle dynamic resizing
+        # Since np.array is immutable, we'll handle resizing in _save or here depending on performance needs.
+        # Given the prompt implies direct appending logic, we ensure the vector exists.
+        
+        if self._vector_matrix is None:
+            self._vector_matrix = np.array([embedding], dtype=np.float32)
+        else:
+            # Append new row
+            new_row = np.array([embedding], dtype=np.float32)
+            self._vector_matrix = np.vstack((self._vector_matrix, new_row))
+
+        # Update secondary index if applicable
+        monto_val = metadata.get("montoTotal")
+        if monto_val is not None:
+            try:
+                monto_float = float(monto_val)
+                if not (np.isnan(monto_float) or np.isinf(monto_float)):
+                    key = round(monto_float * 100)
+                    self._monto_index[key].append(row_idx)
+            except (TypeError, ValueError):
+                pass # Ignore invalid types
+
+    def search(self, query_embedding: List[float], top_k: int = 3) -> List[Dict[str, Any]]:
+        """Searches for the most similar text chunks given an embedding."""
+        if self._vector_matrix is None or len(self._metadata) == 0:
+            return []
+
+        query_vec = np.array([query_embedding], dtype=np.float32)
+        
+        # Cosine similarity via dot product since vectors are L2-normalized
+        similarities = np.dot(self._vector_matrix, query_vec.T).flatten()
+        
+        # Get top_k indices
+        num_results = min(top_k, len(similarities))
+        if num_results <= 0:
+            return []
+            
+        top_indices = np.argsort(similarities)[::-1][:num_results]
+        
+        results = []
+        for idx in top_indices:
+            # Include score in result or just metadata? Prompt implies returning chunks/dict.
+            # We return the full metadata dict as per "get_all_chunks" style, 
+            # but typically search returns metadata + score. 
+            # Based on signature `List[Dict[str, Any]]`, we'll merge metadata with similarity.
+            results.append({**self._metadata[idx], "similarity": float(similarities[idx])})
+            
+        return results
+
+    def get_all_chunks(self) -> List[Dict[str, Any]]:
+        """Retrieves all stored content (for debugging/re-indexing)."""
+        if self._vector_matrix is None or len(self._metadata) == 0:
+            return []
+        
+        # Return metadata associated with each vector. 
+        # If embeddings need to be returned, they are usually separate in this pattern.
+        # The prompt implies `get_all_chunks` returns the content/metadata.
+        return [meta.copy() for meta in self._metadata]
+
+    def search_with_monto_filter(
+        self, 
+        query_embedding: List[float], 
+        monto_total: float, 
+        top_k: int = 3
+    ) -> List[Dict[str, Any]]:
+        """
+        Searches for the most similar text chunks restricted to those with a specific montoTotal.
+        """
+        if self._vector_matrix is None or len(self._metadata) == 0:
+            return []
+
+        # Canonicalize the filter value
+        try:
+            monto_float = float(monto_total)
+            if np.isnan(monto_float) or np.isinf(monto_float):
+                return []
+            key = round(monto_float * 100)
+        except (TypeError, ValueError):
+            return []
+
+        # Retrieve candidate indices from the index
+        candidate_indices = self._monto_index.get(key, [])
+        
+        if not candidate_indices:
+            return []
+
+        # Restrict matrix and metadata to candidates for efficient filtering
+        # Extract sub-matrix for these specific rows
+        candidate_matrix = self._vector_matrix[candidate_indices]
+        candidate_metadata = [self._metadata[idx] for idx in candidate_indices]
+        
+        query_vec = np.array([query_embedding], dtype=np.float32)
+        
+        # Cosine similarity via dot product
+        similarities = np.dot(candidate_matrix, query_vec.T).flatten()
+        
+        # Get top_k indices relative to the candidate list
+        num_results = min(top_k, len(similarities))
+        if num_results <= 0:
+            return []
+            
+        # Argsort returns indices into candidate_metadata/candidate_matrix
+        sorted_candidate_indices = np.argsort(similarities)[::-1][:num_results]
+        
+        results = []
+        for local_idx in sorted_candidate_indices:
+            # Map back to original global row index
+            global_row_idx = candidate_indices[local_idx]
+            results.append({**candidate_metadata[local_idx], "similarity": float(similarities[local_idx])})
+            
+        return results
+
+    def _save(self):
+        """Atomically saves current vectors and metadata to disk."""
+        if self._vector_matrix is None:
+            return
+
+        # Prepare temporary filenames
+        index_fd, index_tmp = tempfile.mkstemp(dir=self.storage_dir, suffix=".npy.tmp")
+        os.close(index_fd)
+        metadata_fd, metadata_tmp = tempfile.mkstemp(dir=self.storage_dir, suffix=".json.tmp")
+        os.close(metadata_fd)
+        
+        try:
+            # Save vectors
+            np.save(index_tmp, self._vector_matrix)
+            if not index_tmp.endswith(".npy"):
+                os.replace(index_tmp + ".npy", index_tmp)
+                
+            # Save metadata
+            with open(metadata_tmp, "w") as f:
+                json.dump(self._metadata, f)
+                
+            # Atomic replacement
+            os.replace(index_tmp, self.index_path)
+            os.replace(metadata_tmp, self.metadata_path)
+            
+        except Exception as e:
+            # Cleanup temp files on failure
+            if os.path.exists(index_tmp):
+                os.remove(index_tmp)
+                if index_tmp.endswith(".npy"):
+                     pass 
+                else:
+                     # Handle np.save suffix logic in cleanup if needed, 
+                     # though mkstemp creates base name. 
+                     # np.save adds .npy. We should clean both.
+                     if os.path.exists(index_tmp + ".npy"):
+                        os.remove(index_tmp + ".npy")
+            if os.path.exists(metadata_tmp):
+                os.remove(metadata_tmp)
+            raise VectorStoreError(f"Failed to save vector store: {e}")
+```

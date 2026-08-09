@@ -1,0 +1,17 @@
+Here is the implementation.
+
+```python
+from sqlalchemy import Column, Text
+from .base import Base
+
+
+class Product(Base):
+    __tablename__ = "products"
+
+    id = Column(Text, primary_key=True)
+    sku = Column(Text, nullable=False)
+
+
+def list_discounted(session):
+    return session.query(Product).filter(Product.discount_percent > 0).all()
+```

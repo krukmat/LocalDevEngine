@@ -1,0 +1,276 @@
+Here is the implementation of the architectural plan, adhering strictly to the provided schema and ensuring transactional atomicity.
+
+### 1. Database Migrations (SQLAlchemy Alembic / Core)
+
+First, we define the new table `discount_codes` and alter the `orders` table within your ORM configuration.
+
+```python
+# models/discount.py
+import uuid
+from datetime import datetime
+from sqlalchemy import Column, Text, Integer, Boolean, DateTime, CheckConstraint
+from sqlalchemy.dialects.postgresql import UUID
+from .base import Base  # Assuming this is your declarative base
+
+class DiscountCode(Base):
+    __tablename__ = "discount_codes"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    code = Column(Text, unique=True, nullable=False, index=True)
+    type = Column(Text, nullable=False)  # 'fixed' or 'percentage'
+    value = Column(Integer, nullable=False)  # Fixed amount in cents OR percentage value (e.g., 20 for 20%)
+    max_uses = Column(Integer, nullable=True)
+    used_count = Column(Integer, nullable=False, default=0)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        CheckConstraint("type IN ('fixed', 'percentage')"),
+    )
+```
+
+```python
+# models/order.py (Modification)
+from sqlalchemy import Column, Integer, Text
+from .base import Base
+
+class Order(Base):
+    __tablename__ = "orders"
+    
+    # ... existing fields ...
+    
+    discount_code_applied = Column(Text, nullable=True)
+    discount_amount_cents = Column(Integer, nullable=False, default=0)
+```
+
+### 2. Domain Error Handling
+
+Standardize error handling for business rule violations.
+
+```python
+# exceptions/domain_errors.py
+class DomainError(Exception):
+    def __init__(self, code: str, message: str):
+        self.code = code
+        self.message = message
+        super().__init__(message)
+```
+
+### 3. Service Layer Implementation
+
+The core logic resides here. Note the dependency injection of `db_session` to ensure all operations occur within the same transaction context managed by the controller.
+
+```python
+# services/order_service.py
+import uuid
+from datetime import datetime, timezone
+from typing import Tuple, Optional
+from sqlalchemy.orm import Session
+from sqlalchemy import text
+
+from models.discount import DiscountCode
+from models.order import Order
+from exceptions.domain_errors import DomainError
+
+class DiscountService:
+    """
+    Handles atomic validation and consumption of discount codes.
+    MUST be called within an active DB session provided by the controller.
+    """
+
+    @staticmethod
+    def apply_and_consume(db_session: Session, code: str) -> Tuple[Optional[int], str]:
+        """
+        Atomically validates a discount code and increments its usage count if valid.
+        
+        Returns:
+            tuple: (discount_value, type_str)
+                   For 'fixed', returns value in cents.
+                   For 'percentage', returns percentage int (e.g., 10 for 10%).
+                   Raises DomainError on failure.
+        """
+        # 1. Atomic Update with FOR UPDATE to prevent race conditions on max_uses
+        query = text("""
+            UPDATE discount_codes 
+            SET used_count = used_count + 1 
+            WHERE id = (
+                SELECT id FROM discount_codes 
+                WHERE code = :code 
+                  AND is_active = true
+                  AND (expires_at IS NULL OR expires_at > :now)
+                  AND (max_uses IS NULL OR used_count < max_uses)
+                LIMIT 1 FOR UPDATE
+            )
+            RETURNING type, value, id
+        """)
+        
+        result = db_session.execute(query, {
+            "code": code.upper(),
+            "now": datetime.now(timezone.utc)
+        }).fetchone()
+
+        if not result:
+            # If no rows were updated by the atomic query, the code is invalid, expired, or maxed out.
+            # We need to distinguish between 'not found' and 'limit reached'.
+            # Check existence first for specific error messaging (read-only check within same TX)
+            existing = db_session.query(DiscountCode).filter(DiscountCode.code == code.upper()).first()
+            
+            if not existing:
+                raise DomainError("INVALID_CODE", "Discount code is not valid.")
+            
+            if existing.expires_at and existing.expires_at < datetime.now(timezone.utc):
+                raise DomainError("EXPIRED_CODE", "This discount has expired.")
+                
+            raise DomainError("USAGE_LIMIT_REACHED", "Maximum usage limit reached for this code.")
+
+        return (result.value, result.type)
+
+
+class OrderService:
+    @staticmethod
+    def create_order(db_session: Session, user_id: uuid.UUID, items: list, discount_code: Optional[str] = None) -> Order:
+        """
+        Creates an order entity. 
+        Does NOT commit. The caller (Controller) is responsible for db.commit().
+        """
+        
+        # 1. Calculate Subtotal
+        subtotal_cents = sum(item["quantity"] * item["unit_price_cents"] for item in items)
+        
+        discount_amount_cents = 0
+        applied_code_str = None
+
+        # 2. Apply Discount Logic
+        if discount_code:
+            val, type_str = DiscountService.apply_and_consume(db_session, discount_code)
+            
+            if type_str == 'fixed':
+                discount_amount_cents = val
+            elif type_str == 'percentage':
+                # Assuming val is an integer percentage (e.g., 15 for 15%)
+                discount_amount_cents = int(subtotal_cents * (val / 100.0))
+            
+            applied_code_str = discount_code.upper()
+
+        # Ensure discount doesn't exceed subtotal
+        if discount_amount_cents > subtotal_cents:
+            discount_amount_cents = subtotal_cents
+
+        final_total_cents = max(0, subtotal_cents - discount_amount_cents)
+
+        # 3. Create Order Entity
+        new_order = Order(
+            user_id=user_id,
+            status="pending",
+            total_cents=final_total_cents,
+            placed_at=datetime.now(timezone.utc),
+            discount_code_applied=applied_code_str,
+            discount_amount_cents=discount_amount_cents
+        )
+
+        # Note: We do NOT add items here. The controller or a separate item service 
+        # should handle order_items insertion within the same session before commit.
+        
+        return new_order
+```
+
+### 4. API Controller Integration
+
+The controller manages the session lifecycle and transaction boundaries.
+
+```python
+# routers/orders.py
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from pydantic import BaseModel, Field, validator
+from typing import Optional, List, Dict, Any
+import uuid
+
+from database.session import get_db  # Dependency yielding session
+from services.order_service import OrderService
+from exceptions.domain_errors import DomainError
+
+router = APIRouter()
+
+class ItemDTO(BaseModel):
+    product_id: uuid.UUID
+    quantity: int = Field(gt=0)
+    unit_price_cents: int
+
+class OrderCreateRequest(BaseModel):
+    user_id: uuid.UUID
+    items: List[ItemDTO]
+    discount_code: Optional[str] = None
+
+    @validator('discount_code', pre=True, always=True)
+    def normalize_discount_code(cls, v):
+        if v is not None:
+            if len(v) > 64:
+                raise ValueError("Discount code must be 64 characters or less.")
+            return v.upper()
+        return v
+
+@router.post("/orders", status_code=201)
+def create_order(request: OrderCreateRequest, db: Session = Depends(get_db)):
+    """
+    Creates an order with transactional atomicity.
+    """
+    
+    try:
+        # 1. Create the order header entity (discount validated & consumed atomically inside)
+        new_order = OrderService.create_order(
+            db_session=db,
+            user_id=request.user_id,
+            items=[item.dict() for item in request.items],
+            discount_code=request.discount_code
+        )
+
+        # 2. Insert Order Items (Transactional part of the same session)
+        # In a real app, you'd likely have an OrderItemService or handle this here
+        from models.order_item import OrderItem
+        order_items = [
+            OrderItem(
+                order_id=new_order.id,
+                product_id=item.product_id,
+                quantity=item.quantity,
+                unit_price_cents=item.unit_price_cents
+            )
+            for item in request.items
+        ]
+        db.add_all(order_items)
+
+        # 3. Commit the entire transaction
+        db.commit()
+        
+        # Refresh to ensure ID is populated if auto-generated strategy requires it
+        db.refresh(new_order)
+
+        return {
+            "order_id": str(new_order.id),
+            "total_cents": new_order.total_cents,
+            "discount_amount_cents": new_order.discount_amount_cents,
+            "applied_discount_code": new_order.discount_code_applied,
+            "status": new_order.status
+        }
+
+    except DomainError as e:
+        db.rollback()
+        status_codes = {
+            "INVALID_CODE": 400,
+            "EXPIRED_CODE": 400,
+            "USAGE_LIMIT_REACHED": 409
+        }
+        raise HTTPException(
+            status_code=status_codes.get(e.code, 400),
+            detail=e.message
+        )
+
+    except Exception as e:
+        db.rollback()
+        # Log e internally for debugging
+        raise HTTPException(
+            status_code=500,
+            detail="Internal server error while processing order."
+        )
+```

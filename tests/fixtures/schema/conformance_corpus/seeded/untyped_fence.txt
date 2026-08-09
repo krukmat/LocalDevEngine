@@ -1,0 +1,5 @@
+Here is the implementation.
+
+```
+CREATE INDEX idx_users_email ON users(email);
+```

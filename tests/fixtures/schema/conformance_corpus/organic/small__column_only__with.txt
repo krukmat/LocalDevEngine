@@ -1,0 +1,117 @@
+```python
+import psycopg2
+from psycopg2 import errors, sql
+from typing import Optional
+
+def ensure_sku_index(connection: psycopg2.extensions.connection) -> None:
+    """
+    Ensures idx_products_sku_concurrent exists and is valid on products.sku.
+    
+    This function handles the creation of a unique B-tree index on the 'products' table's 'sku' column.
+    It implements robust validity checks to clean up leftover invalid indexes and enforces autocommit
+    mode to satisfy PostgreSQL's requirement that CREATE INDEX CONCURRENTLY cannot run inside a transaction block.
+
+    Args:
+        connection: An active psycopg2 database connection.
+        
+    Raises:
+        SystemError: If duplicate SKUs are detected, preventing index creation.
+        psycopg2.Error: For any other unexpected database errors.
+    """
+    
+    # 1. Ensure Autocommit Mode (Fix #2)
+    # CREATE INDEX CONCURRENTLY fails if executed within an explicit transaction block.
+    original_autocommit = connection.autocommit
+    try:
+        if not connection.autocommit:
+            connection.autocommit = True
+        
+        cursor = connection.cursor()
+        
+        # 2. Check for Valid Index (Fix #1: Check indisvalid)
+        # We explicitly verify if the index exists and is usable by checking pg_index.indisvalid.
+        # This distinguishes between a healthy index, a failed/invalid leftover, or non-existence.
+        cursor.execute("""
+            SELECT 
+                CASE WHEN i.indisvalid THEN 'VALID' ELSE 'INVALID' END 
+            FROM pg_index i
+            JOIN pg_class t ON i.indrelid = t.oid
+            JOIN pg_class idx ON i.indexrelid = idx.oid
+            WHERE t.relname = 'products' 
+              AND idx.relname = 'idx_products_sku_concurrent'
+        """)
+        
+        row = cursor.fetchone()
+        
+        if row and row[0] == 'VALID':
+            # Index exists and is valid. Safe to skip.
+            print("Index idx_products_sku_concurrent already exists and is valid.")
+            return
+
+        # If we get here, index either doesn't exist or is invalid (from a previous failed attempt).
+        # Clean up any leftover invalid index to ensure a clean slate for creation.
+        cursor.execute(sql.SQL("""
+            DROP INDEX CONCURRENTLY IF EXISTS idx_products_sku_concurrent;
+        """))
+        
+        # 3. Create the Index
+        print("Creating new unique concurrent index on products.sku...")
+        cursor.execute(sql.SQL("""
+            CREATE UNIQUE INDEX idx_products_sku_concurrent 
+            ON products (sku) CONCURRENTLY;
+        """))
+        
+        print("Index created successfully.")
+
+    except errors.UniqueViolation as e:
+        # Fix #3: Use diag.constraint_name for robust identification of the violating constraint
+        constraint = e.diag.constraint_name
+        if constraint == 'idx_products_sku_concurrent':
+            raise SystemError(
+                f"Duplicate SKU found in 'products' table. Constraint violated: {constraint}. "
+                "Please identify and resolve duplicate SKUs before retrying."
+            ) from e
+        else:
+            # Another unique constraint triggered (e.g., PK violation if logic was different), re-raise
+            raise
+
+    except Exception as e:
+        # Catch other potential errors during DDL execution
+        raise psycopg2.DatabaseError(f"Failed to create or verify index: {str(e)}") from e
+    
+    finally:
+        if 'cursor' in locals():
+            cursor.close()
+        # Restore original autocommit state to maintain caller's transaction context integrity
+        connection.autocommit = original_autocommit
+
+
+def handle_sku_insertion(cursor: psycopg2.extensions.cursor, sku: str, product_id: str) -> None:
+    """
+    Executes an insert for a product and handles unique constraint violations robustly.
+
+    Args:
+        cursor: An active database cursor.
+        sku: The SKU string to insert.
+        product_id: The UUID of the product.
+        
+    Raises:
+        SystemError: If a duplicate SKU is detected (HTTP 409 equivalent).
+        psycopg2.Error: For other database errors.
+    """
+    query = sql.SQL("""
+        INSERT INTO products (id, sku, name, price_cents) 
+        VALUES (%s, %s, %s, %s)
+    """)
+    
+    # Note: Name and price_cents are placeholders here as they are not provided in the task breakdown inputs.
+    # In a real scenario, these would be populated from request data.
+    try:
+        cursor.execute(query, (product_id, sku, "Placeholder Name", 0))
+    except errors.UniqueViolation as e:
+        if e.diag.constraint_name == 'idx_products_sku_concurrent':
+            raise SystemError(f"SKU '{sku}' is already in use.") from e
+        else:
+            # Re-raise if it's a different unique constraint (e.g., PK)
+            raise
+```

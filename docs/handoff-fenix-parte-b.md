@@ -200,41 +200,65 @@ Cuando está activo, `outcome.schema_grounding` trae:
   "tables_omitted": [], "matched": ["public.orders"], "related_via_fk": ["public.customers"],
   "strategy": "lexical", "degraded": false, "reason": null,
   "block_chars": 812, "max_chars": 4000, "block_over_budget": false,
-  "identifier_check": {"ran": true, "checked": 6, "unknown_count": 0,
-                        "known_tables": ["public.customers", "public.orders"],
-                        "unknown_tables": [], "known_columns": ["public.orders.id", ...],
-                        "unknown_columns": []}
+  "conformance_check": {
+    "ran": true, "verdict": "NO_CONFORME",
+    "violations": [
+      {"type": "UNKNOWN_COLUMN_REF", "detail": "public.orders.discount_percent", "line": 42}
+    ],
+    "regions_checked": 3, "regions_unparseable": 0, "regions_untyped": 0
+  }
 }
 ```
 
-⚠️ **`identifier_check` no es utilizable como señal de auditoría. No lo consumas.** Una versión
-anterior de este documento lo recomendaba como tal, argumentando que es determinista y
-recomputable por el caller. Determinista lo es; útil no. El gate empírico de Fase 3 corrió
-(18 corridas, [docs/fase3-decision.md](fase3-decision.md)) y encontró que el checker falla en
-las dos direcciones a la vez:
+`conformance_check` **reemplaza** el `identifier_check` que una versión anterior de este
+documento marcó como no utilizable (ver [docs/fase3-decision.md](fase3-decision.md) para el
+diagnóstico completo de por qué el checker basado en regex fallaba en ambas direcciones — eso
+sigue siendo la historia correcta de por qué se reemplazó, no una descripción del campo actual).
+El reemplazo está especificado en
+[docs/plan-schema-conformance.md](plan-schema-conformance.md) y **construido** (tareas C.1–C.6):
+un extractor basado en `ast` de Python (no regex) reconoce patrones SQLAlchemy declarativo
+(`__tablename__`, `Column`/`mapped_column`, `.query(Model)`/`select(Model)`), resuelve cada
+referencia contra `snapshot ∪ definiciones vistas en la salida`, y produce una lista tipada de
+violaciones en vez de un contador escalar. Validado contra un corpus de 22 casos etiquetados a
+mano (los 15 recibos con implementación real de la Fase 3 + 7 sembrados) con **0 falsos positivos
+y 100% de detección** (`tests/run_conformance_gate.py`, corpus en
+`tests/fixtures/schema/conformance_corpus/`).
 
-- **Sobre-marca**: extrae identificadores con regex sobre texto libre, así que `from X import Y`
-  de Python matchea el `FROM` de SQL. Salida real sobre una implementación generada:
-  `['sqlalchemy.orm', 'datetime', 'models.order', 'the', 'within', 'of']`.
-- **Sub-reconoce**: en 4 de 7 corridas con schema, `known_tables: []` pese a que el modelo usó
-  correctamente las tablas que el bloque le mostró — `__tablename__ = "orders"` no matchea nada.
+**Qué sí es utilizable, y con qué límites:**
 
-Recomputarlo del lado de fenix reproduce el mismo número equivocado, así que la propiedad de
-"recomputable" no compensa nada. **`unknown_count` no debe entrar en ninguna decisión de B1-B11.**
-El campo sigue en el recibo (el knob `schema_grounding.identifier_check` sigue en `true` por
-defecto) para no romper el esquema, y sigue sin gatear nada del lado del motor.
+- `verdict: "CONFORME" | "NO_CONFORME"` y la lista `violations` (`type`, `detail`, `line`) **sí
+  son una señal de auditoría real** — determinista, recomputable por fenix a partir de
+  `(implementación, snapshot)`, y verificada contra evidencia real, no solo teóricamente
+  recomputable como pasaba con el campo anterior.
+- **Alcance de reconocimiento, no de dato**: el modelo de datos verificado es 100% genérico (el
+  `SchemaSnapshot` que fenix exporta). Lo que NO es genérico todavía es qué *patrones de código*
+  el extractor reconoce — hoy solo SQLAlchemy declarativo en Python. Cualquier otro acceso a
+  datos (Django ORM, `psycopg2`/queries crudas, SQL embebido) no genera `UNKNOWN_*` porque el
+  extractor no lo reconoce — en cambio, la región se marca `UNPARSEABLE_REGION` (si el bloque se
+  declaró como código pero no parseó, o es SQL — SQL nunca se parsea, ver más abajo) o
+  `UNTYPED_REGION` (bloque de código sin lenguaje declarado). **Un `verdict: "CONFORME"` con
+  varios `UNPARSEABLE_REGION`/`UNTYPED_REGION` no significa "sin alucinaciones" — significa "sin
+  alucinaciones detectadas en lo que se pudo verificar".** fenix debe mirar `regions_unparseable`/
+  `regions_untyped` junto con `verdict`, no solo `verdict` solo.
+- **SQL crudo nunca se parsea** (decisión registrada en plan-schema-conformance.md §5: `sqlglot`
+  quedó deferido por falta de evidencia de que fuera necesario — los dos únicos eventos de
+  invención genuinos de la Fase 3 fueron construcciones Python/ORM, no SQL). Toda región `sql`
+  se reporta como `UNPARSEABLE_REGION`, siempre.
+- `regions_checked` es cuántas regiones Python se lograron parsear y analizar; no incluye prosa
+  (nunca se analiza, por diseño) ni SQL/untyped (van a los contadores de arriba).
 
-El reemplazo — verificación de conformidad basada en parsers (`ast` de Python, SQL con dialecto)
-en vez de regex — está especificado en
-[docs/plan-schema-conformance.md](plan-schema-conformance.md) pero **no está construido**. Cuando
-lo esté, este documento se actualiza con el contrato nuevo; hasta entonces, esta capa no le
-ofrece a fenix ninguna señal de auditoría.
+**Lo que sigue sin cambiar:** este campo corre en modo `report` únicamente — nunca bloquea ni
+gatea la corrida. El modo `enforce` (rechazar y reintentar sobre una violación) está especificado
+pero diferido (C.7 en plan-schema-conformance.md §8), condicionado a que la forma del pipeline
+BA/Broker se defina primero, porque tocaría el mismo lazo QA↔Implementer que esa pieza
+reestructuraría. Si fenix necesita bloqueo hoy, tiene que leer `conformance_check.verdict` y
+decidir del lado de fenix — el motor no lo hace por vos todavía.
 
 **Estado del resto de la capa:** el bloque de schema en sí (selección + render autoritativo)
-sigue disponible y es opt-in, sin costo si no se activa. Lo que el gate no pudo demostrar es que
-reduzca invención de nombres — no porque midiera un efecto negativo, sino porque el instrumento
-de medición (el mismo `identifier_check` de arriba) no era confiable. Si fenix la activa, es
-razonable, pero sin tasa de detección conocida.
+sigue disponible y es opt-in, sin costo si no se activa. La Fase 3 no pudo demostrar
+estadísticamente que reduzca invención de nombres (el instrumento de medición de esa fase era el
+`identifier_check` roto) — eso sigue siendo cierto y no lo revierte el trabajo de arriba, que es
+sobre la *detección* post-hoc, no sobre si el bloque previene la invención en primer lugar.
 
 ## Qué NO cambió (y por qué importa para Parte B)
 

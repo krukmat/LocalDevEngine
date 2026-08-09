@@ -1,0 +1,356 @@
+Here is the implementation of the requested changes, adhering to the architectural plan and project context.
+
+### 1. `memory/base.py` (Abstract Class Update)
+
+Update the `BaseMemory` abstract class to define the contract for filtered searches.
+
+```python
+# /Users/matias/LocalDevEngine/memory/base.py
+import abc
+from typing import Dict, Any, List, Optional
+import numpy as np
+
+class BaseMemory(abc.ABC):
+    """Abstract base class for Vector Memory stores."""
+
+    @abc.abstractmethod
+    def search(
+        self,
+        query_vector: np.ndarray,
+        limit: int,
+        filters: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Search for similar vectors.
+
+        Args:
+            query_vector: The query vector to search against.
+            limit: Maximum number of results to return.
+            filters: Optional dictionary for filtering results. 
+                     Supported schema: {"amount_cents": int}
+
+        Returns:
+            List of metadata dicts corresponding to the most similar vectors.
+        """
+        pass
+
+    # ... other existing abstract methods like add_documents, remove_documents etc.
+```
+
+### 2. `memory/local_memory.py` (Implementation Update)
+
+Implement `_amount_cents_index`, update `_load`, `_save`, and override `search` with filtering logic.
+
+```python
+# /Users/matias/LocalDevEngine/memory/local_memory.py
+import json
+import os
+import tempfile
+import logging
+import threading
+from typing import List, Dict, Any, Optional, Set
+import numpy as np
+from memory.base import BaseMemory
+
+logger = logging.getLogger(__name__)
+
+class VectorStoreError(RuntimeError):
+    """Raised when the on-disk store is missing, corrupt, or inconsistent."""
+    pass
+
+class LocalVectorMemory(BaseMemory):
+    """
+    A lightweight local implementation of a Vector Store using NumPy.
+    Supports optional metadata indexing for efficient filtering by 'amount_cents'.
+    """
+
+    def __init__(self, storage_dir: str, dimension: int):
+        self.storage_dir = storage_dir
+        self.index_path = os.path.join(storage_dir, "embeddings.npy")
+        self.metadata_path = os.path.join(storage_dir, "metadata.json")
+        self.dimension = dimension
+        
+        # Core storage
+        self._vector_matrix: Optional[np.ndarray] = None
+        self._metadata: List[Dict[str, Any]] = []
+        
+        # New Metadata Index for amount_cents
+        # Structure: Dict[int, List[int]] mapping amount_cents value -> list of row indices
+        self._amount_cents_index: Dict[int, List[int]] = {}
+        
+        # Thread safety lock for index updates and searches to ensure consistency
+        self._lock = threading.RLock()
+
+        if not os.path.exists(storage_dir):
+            os.makedirs(storage_dir)
+
+        self._load()
+
+    def _build_index(self):
+        """
+        Rebuilds or initializes the _amount_cents_index based on current metadata.
+        Called after load or add_documents to ensure sync.
+        """
+        new_index: Dict[int, List[int]] = {}
+        expected_count = 0
+        
+        for i, meta in enumerate(self._metadata):
+            val = meta.get("amount_cents")
+            
+            # Strict validation: must be int, not None, not float (unless it's a whole number, but spec says strictly int type usually implies JSON numbers without decimals or explicit int casting)
+            # JSON parsing produces int for 100.0? No, 100 becomes int 100 in json.loads usually. 
+            # However, python types are strict. We check isinstance(val, int).
+            if isinstance(val, int):
+                new_index.setdefault(val, []).append(i)
+                expected_count += 1
+        
+        # Consistency Check: Count of indices in new_index lists must match expected_count
+        actual_indexed_count = sum(len(indices) for indices in new_index.values())
+        
+        if actual_indexed_count != expected_count:
+            raise VectorStoreError("Metadata index desynced with vector matrix content during build.")
+
+        # Bound Safety Check: All pointers must be valid
+        matrix_len = len(self._vector_matrix) if self._vector_matrix is not None else 0
+        
+        for indices in new_index.values():
+            for idx in indices:
+                if not (0 <= idx < matrix_len):
+                    raise VectorStoreError("Metadata index contains invalid row pointers.")
+
+        # Swap the old index with the validated new one
+        self._amount_cents_index = new_index
+
+    def _load(self):
+        """Loads existing vectors and metadata from disk, validating consistency."""
+        index_exists = os.path.exists(self.index_path)
+        metadata_exists = os.path.exists(self.metadata_path)
+
+        if not index_exists and not metadata_exists:
+            return
+        
+        # If one exists but not the other, it's an error state (unless empty dir)
+        # Assuming empty dir has no files.
+        
+        matrix = np.load(self.index_path, allow_pickle=False)
+        with open(self.metadata_path, "r") as f:
+            metadata = json.load(f)
+
+        if matrix.ndim != 2:
+            raise VectorStoreError(f"Vector store index has unexpected shape {matrix.shape!r}")
+        if matrix.shape[0] != len(metadata):
+            raise VectorStoreError(
+                f"Vector store is out of sync: {matrix.shape[0]} vectors but "
+                f"{len(metadata)} metadata rows."
+            )
+        if matrix.shape[0] > 0 and matrix.shape[1] != self.dimension:
+            raise VectorStoreError(
+                f"Vector store dimension {matrix.shape[1]} does not match configured "
+                f"dimension {self.dimension}."
+            )
+
+        self._vector_matrix = matrix.astype(np.float32, copy=False)
+        self._metadata = metadata
+        
+        # Build the index upon loading
+        with self._lock:
+            self._build_index()
+
+    def _save(self):
+        """Atomically saves current vectors and metadata to disk."""
+        if self._vector_matrix is None or len(self._metadata) == 0:
+            return
+
+        # Save Vector Matrix
+        index_fd, index_tmp = tempfile.mkstemp(dir=self.storage_dir, suffix=".npy.tmp")
+        os.close(index_fd)
+        
+        metadata_fd, metadata_tmp = tempfile.mkstemp(dir=self.storage_dir, suffix=".json.tmp")
+        os.close(metadata_fd)
+
+        try:
+            np.save(index_tmp, self._vector_matrix)
+            
+            # Handle numpy's tendency to append .npy if not strictly managed, 
+            # though mkstemp gave us the path. We need to ensure the file exists at index_tmp before replace?
+            # np.save writes to the file. If we passed 'index_tmp', it saves there.
+            
+            # Save Metadata
+            with open(metadata_tmp, "w") as f:
+                json.dump(self._metadata, f)
+
+            # Atomic moves
+            # np.save adds .npy extension if the filename doesn't end with it? 
+            # The docs say: "If filename is a file object (not string), data is written to that file.
+            # If filename is a string or Path, a file is opened for writing and numpy saves there."
+            # However, tempfile.mkstemp returns a path string? No, it returns fd and path string.
+            # We created the file but didn't write to it yet via python io.
+            # np.save(filename) will create/open the file.
+            
+            os.replace(index_tmp + ("" if index_tmp.endswith('.npy') else '.npy'), self.index_path) # Note: np.save might have added .npy
+            
+            # Correcting np.save behavior for temp files:
+            # It's safer to let np.save create the final name or handle extensions explicitly.
+            # Let's stick to a simpler approach: save to tmp, then rename.
+            
+            # Actually, previous code snippet had:
+            # if not index_tmp.endswith(".npy"): os.replace(index_tmp + ".npy", index_tmp)
+            # This implies the file was saved as index_tmp.npy if it didn't end in .npy.
+            
+            os.replace(metadata_tmp, self.metadata_path)
+
+        except Exception as e:
+            # Cleanup temp files on failure
+            try: os.unlink(index_tmp + ("" if index_tmp.endswith('.npy') else '.npy'))
+            except: pass
+            try: os.unlink(metadata_tmp)
+            except: pass
+            raise VectorStoreError(f"Failed to save vector store: {e}")
+
+    def add_documents(self, documents: List[Dict[str, Any]], embeddings: np.ndarray):
+        """
+        Add new documents and their embeddings.
+        """
+        if not documents or embeddings.size == 0:
+            return
+
+        n_docs = len(documents)
+        
+        # Ensure embeddings shape is correct
+        if embeddings.shape[0] != n_docs:
+            raise ValueError("Number of embeddings must match number of documents.")
+        
+        with self._lock:
+            if self._vector_matrix is None:
+                # First save
+                self._vector_matrix = embeddings
+            else:
+                self._vector_matrix = np.vstack([self._vector_matrix, embeddings])
+            
+            self._metadata.extend(documents)
+            
+            # Incremental index update preferred for performance? 
+            # For simplicity and safety against race conditions with _load logic consistency, 
+            # we rebuild. Given typical local memory sizes, this is usually fast enough.
+            # If high throughput is needed, incremental updates can be added here.
+            self._build_index()
+            
+            self._save()
+
+    def search(
+        self,
+        query_vector: np.ndarray,
+        limit: int,
+        filters: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Search for similar vectors with optional metadata filtering.
+        """
+        # Validate filter type if provided
+        amount_cents_val = None
+        if filters and "amount_cents" in filters:
+            val = filters["amount_cents"]
+            if val is None:
+                raise ValueError("filters['amount_cents'] cannot be null.")
+            if not isinstance(val, int):
+                # Allow floats that are effectively integers? Plan says strictly int.
+                raise ValueError("filters['amount_cents'] must be an integer.")
+            amount_cents_val = val
+
+        with self._lock:
+            if self._vector_matrix is None or len(self._vector_matrix) == 0:
+                return []
+
+            # Determine candidate indices
+            candidate_indices: Optional[List[int]] = None
+            
+            if filters and "amount_cents" in filters:
+                # Look up in index
+                candidates = self._amount_cents_index.get(amount_cents_val)
+                if not candidates:
+                    # Optimization: If amount not in index, no results possible
+                    return []
+                
+                # Ensure all candidate indices are still valid (in case of concurrent removals or bugs)
+                matrix_len = len(self._vector_matrix)
+                valid_candidates = [i for i in candidates if 0 <= i < matrix_len]
+                
+                if not valid_candidates:
+                    return []
+                
+                candidate_indices = valid_candidates
+
+            # Calculate similarities
+            if candidate_indices is not None:
+                # Use the index to slice only relevant vectors
+                query_vector_flat = query_vector.flatten()
+                query_norm = np.linalg.norm(query_vector_flat)
+                
+                # Avoid division by zero for zero vectors if necessary, 
+                # but since we L2 normalize storage, dot product = cosine.
+                # If query is 0 vector, similarity is 0.
+                
+                sub_matrix = self._vector_matrix[candidate_indices]
+                scores = np.dot(sub_matrix, query_vector_flat)
+            else:
+                # Full scan if no filter or filter doesn't match index key schema
+                query_vector_flat = query_vector.flatten()
+                sub_matrix = self._vector_matrix
+                scores = np.dot(sub_matrix, query_vector_flat)
+
+            # Get top k
+            if len(scores) == 0:
+                return []
+
+            # Argsort descending
+            num_results = min(limit, len(scores))
+            top_indices = np.argsort(scores)[::-1][:num_results]
+            
+            # Map back to original indices if we sliced
+            original_indices = [candidate_indices[i] for i in top_indices] if candidate_indices else list(top_indices)
+
+            # Retrieve metadata
+            results = []
+            for idx in original_indices:
+                results.append({
+                    "metadata": self._metadata[idx],
+                    "score": float(scores[original_indices.index(idx)]) if candidate_indices else float(scores[idx]),
+                    "index": int(idx)
+                })
+                
+        return results
+
+    # Optional: Implement remove_documents if not already in BaseMemory
+    def remove_documents(self, ids: List[str]):
+        """Remove documents by ID (requires custom logic to sync indices)."""
+        with self._lock:
+            # 1. Identify indices to remove from metadata list
+            indices_to_remove = set()
+            new_metadata = []
+            
+            # We need a way to map 'id' to index. Assuming metadata has a unique field or we store ids separately?
+            # The prompt doesn't specify ID schema in metadata. 
+            # For this implementation, we assume metadata contains an 'id' field matching the input id list.
+            
+            for i, meta in enumerate(self._metadata):
+                if "id" in meta and meta["id"] in ids:
+                    indices_to_remove.add(i)
+                else:
+                    new_metadata.append(meta)
+            
+            if not indices_to_remove:
+                return
+
+            # 2. Filter vector matrix
+            mask = np.array([i not in indices_to_remove for i in range(len(self._vector_matrix))])
+            self._vector_matrix = self._vector_matrix[mask]
+            
+            # 3. Update metadata
+            self._metadata = new_metadata
+            
+            # 4. Rebuild index to remove stale pointers
+            self._build_index()
+            
+            # 5. Save
+            self._save()
+```
