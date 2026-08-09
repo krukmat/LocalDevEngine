@@ -1,0 +1,54 @@
+{
+  "dialect": "postgres",
+  "tables": [
+    {
+      "name": "users",
+      "comment": "Registered accounts",
+      "columns": [
+        {"name": "id", "type": "uuid", "primary_key": true, "nullable": false},
+        {"name": "email", "type": "text", "nullable": false},
+        {"name": "display_name", "type": "text"},
+        {"name": "created_at", "type": "timestamptz", "nullable": false}
+      ]
+    },
+    {
+      "name": "orders",
+      "comment": "Purchases placed by a user",
+      "columns": [
+        {"name": "id", "type": "uuid", "primary_key": true, "nullable": false},
+        {"name": "user_id", "type": "uuid", "nullable": false},
+        {"name": "status", "type": "text", "nullable": false},
+        {"name": "total_cents", "type": "integer", "nullable": false},
+        {"name": "placed_at", "type": "timestamptz", "nullable": false}
+      ],
+      "foreign_keys": [
+        {"columns": ["user_id"], "references_table": "users", "references_columns": ["id"]}
+      ]
+    },
+    {
+      "name": "order_items",
+      "comment": "Line items within an order",
+      "columns": [
+        {"name": "id", "type": "uuid", "primary_key": true, "nullable": false},
+        {"name": "order_id", "type": "uuid", "nullable": false},
+        {"name": "product_id", "type": "uuid", "nullable": false},
+        {"name": "quantity", "type": "integer", "nullable": false},
+        {"name": "unit_price_cents", "type": "integer", "nullable": false}
+      ],
+      "foreign_keys": [
+        {"columns": ["order_id"], "references_table": "orders", "references_columns": ["id"]},
+        {"columns": ["product_id"], "references_table": "products", "references_columns": ["id"]}
+      ]
+    },
+    {
+      "name": "products",
+      "comment": "Sellable catalog items",
+      "columns": [
+        {"name": "id", "type": "uuid", "primary_key": true, "nullable": false},
+        {"name": "sku", "type": "text", "nullable": false},
+        {"name": "name", "type": "text", "nullable": false},
+        {"name": "price_cents", "type": "integer", "nullable": false}
+      ]
+    }
+  ]
+}

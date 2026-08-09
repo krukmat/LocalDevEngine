@@ -1,0 +1,57 @@
+{
+  "schema_version": "1.1",
+  "request_id": "525554d0a29f",
+  "status": "failed",
+  "query": "Improve logging across the service",
+  "query_sha256": "146021a2ee2b43389b2dcd0e9381783fb80551129c4efb43667644b655785683",
+  "started_at": "2026-08-09T17:35:29.613860+00:00",
+  "finished_at": "2026-08-09T17:35:29.620785+00:00",
+  "duration_ms": 6.9,
+  "macro_iteration": 1,
+  "outcome": {},
+  "config_fingerprint": {
+    "models": {
+      "router": "phi3:mini",
+      "manager": "gemma4:26b-a4b-it-qat",
+      "architect": "qwen3.6:35b-a3b",
+      "implementer": "qwen3.6:35b-a3b",
+      "qa_auditor": "gemma4:26b-a4b-it-qat",
+      "copilot": "granite-code:8b"
+    },
+    "max_qa_iterations": 2,
+    "closing_report_enabled": true,
+    "retrieval": {
+      "top_k": 5,
+      "min_score": 0.0,
+      "max_context_chars": 6000,
+      "breakdown_reserve_chars": 1200
+    },
+    "schema_grounding": {
+      "max_tables": 12,
+      "max_chars": 4000,
+      "fk_expansion_depth": 1,
+      "identifier_check": true
+    },
+    "request": {
+      "output_contract": null,
+      "schema_grounding": false,
+      "schema_tables": 0
+    }
+  },
+  "artifacts": {},
+  "trace": [],
+  "error": {
+    "stage": null,
+    "role": null,
+    "model": null,
+    "message": "All connection attempts failed"
+  },
+  "plan": null,
+  "implementation": null,
+  "fast_path": false,
+  "qa_approved": null,
+  "qa_feedback": null,
+  "breakdown": null,
+  "closing_report": null,
+  "deviation": null
+}

@@ -207,21 +207,34 @@ Cuando está activo, `outcome.schema_grounding` trae:
 }
 ```
 
-`identifier_check` es el único campo de **todo** el recibo (Parte A o esta capa) que no es
-autoreporte puro: es comparación de strings determinista contra un artefacto que el caller ya
-tiene (el mismo `schema.json`), así que fenix puede recomputarlo de forma independiente
-(`context/schema/identifiers.py: check_identifiers(implementation_text, snapshot)`) y verificar
-que coincide — es el único caso en el que el recibo puede *subir* la confianza del caller en vez
-de solo poder bajarla. **Hoy no gatea nada**: un `unknown_count > 0` se reporta pero no cambia
-`implementation_check.approved`. Si fenix quisiera usarlo como señal de auditoría adicional
-(análoga a B3/B4 pero para nombres de schema en vez de gramática de archivo), es una opción real
-hoy — no depende de que LocalDevEngine implemente ningún gate propio primero.
+⚠️ **`identifier_check` no es utilizable como señal de auditoría. No lo consumas.** Una versión
+anterior de este documento lo recomendaba como tal, argumentando que es determinista y
+recomputable por el caller. Determinista lo es; útil no. El gate empírico de Fase 3 corrió
+(18 corridas, [docs/fase3-decision.md](fase3-decision.md)) y encontró que el checker falla en
+las dos direcciones a la vez:
 
-**Estado de esta capa:** construida y verificada offline, pero el gate empírico que demuestra que
-reduce invención de verdad (correr el pipeline completo con y sin el schema sobre casos diseñados
-para fallar) todavía no corrió — ver `docs/plan-schema-grounding.md` §5.2. No es una razón para no
-usarla (es opt-in, sin costo si no se activa), pero sí una razón para no asumir una tasa de
-detección conocida si fenix decide adoptarla ya.
+- **Sobre-marca**: extrae identificadores con regex sobre texto libre, así que `from X import Y`
+  de Python matchea el `FROM` de SQL. Salida real sobre una implementación generada:
+  `['sqlalchemy.orm', 'datetime', 'models.order', 'the', 'within', 'of']`.
+- **Sub-reconoce**: en 4 de 7 corridas con schema, `known_tables: []` pese a que el modelo usó
+  correctamente las tablas que el bloque le mostró — `__tablename__ = "orders"` no matchea nada.
+
+Recomputarlo del lado de fenix reproduce el mismo número equivocado, así que la propiedad de
+"recomputable" no compensa nada. **`unknown_count` no debe entrar en ninguna decisión de B1-B11.**
+El campo sigue en el recibo (el knob `schema_grounding.identifier_check` sigue en `true` por
+defecto) para no romper el esquema, y sigue sin gatear nada del lado del motor.
+
+El reemplazo — verificación de conformidad basada en parsers (`ast` de Python, SQL con dialecto)
+en vez de regex — está especificado en
+[docs/plan-schema-conformance.md](plan-schema-conformance.md) pero **no está construido**. Cuando
+lo esté, este documento se actualiza con el contrato nuevo; hasta entonces, esta capa no le
+ofrece a fenix ninguna señal de auditoría.
+
+**Estado del resto de la capa:** el bloque de schema en sí (selección + render autoritativo)
+sigue disponible y es opt-in, sin costo si no se activa. Lo que el gate no pudo demostrar es que
+reduzca invención de nombres — no porque midiera un efecto negativo, sino porque el instrumento
+de medición (el mismo `identifier_check` de arriba) no era confiable. Si fenix la activa, es
+razonable, pero sin tasa de detección conocida.
 
 ## Qué NO cambió (y por qué importa para Parte B)
 

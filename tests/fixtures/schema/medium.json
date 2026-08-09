@@ -1,0 +1,182 @@
+{
+  "dialect": "postgres",
+  "tables": [
+    {
+      "name": "organizations",
+      "columns": [
+        {"name": "id", "type": "uuid", "primary_key": true, "nullable": false},
+        {"name": "name", "type": "text", "nullable": false}
+      ]
+    },
+    {
+      "name": "teams",
+      "columns": [
+        {"name": "id", "type": "uuid", "primary_key": true, "nullable": false},
+        {"name": "organization_id", "type": "uuid", "nullable": false},
+        {"name": "name", "type": "text", "nullable": false}
+      ],
+      "foreign_keys": [
+        {"columns": ["organization_id"], "references_table": "organizations", "references_columns": ["id"]}
+      ]
+    },
+    {
+      "name": "users",
+      "columns": [
+        {"name": "id", "type": "uuid", "primary_key": true, "nullable": false},
+        {"name": "team_id", "type": "uuid", "nullable": false},
+        {"name": "email", "type": "text", "nullable": false}
+      ],
+      "foreign_keys": [
+        {"columns": ["team_id"], "references_table": "teams", "references_columns": ["id"]}
+      ]
+    },
+    {
+      "name": "projects",
+      "columns": [
+        {"name": "id", "type": "uuid", "primary_key": true, "nullable": false},
+        {"name": "team_id", "type": "uuid", "nullable": false},
+        {"name": "name", "type": "text", "nullable": false}
+      ],
+      "foreign_keys": [
+        {"columns": ["team_id"], "references_table": "teams", "references_columns": ["id"]}
+      ]
+    },
+    {
+      "name": "tasks",
+      "columns": [
+        {"name": "id", "type": "uuid", "primary_key": true, "nullable": false},
+        {"name": "project_id", "type": "uuid", "nullable": false},
+        {"name": "assignee_id", "type": "uuid"},
+        {"name": "title", "type": "text", "nullable": false},
+        {"name": "status", "type": "text", "nullable": false}
+      ],
+      "foreign_keys": [
+        {"columns": ["project_id"], "references_table": "projects", "references_columns": ["id"]},
+        {"columns": ["assignee_id"], "references_table": "users", "references_columns": ["id"]}
+      ]
+    },
+    {
+      "name": "task_comments",
+      "columns": [
+        {"name": "id", "type": "uuid", "primary_key": true, "nullable": false},
+        {"name": "task_id", "type": "uuid", "nullable": false},
+        {"name": "author_id", "type": "uuid", "nullable": false},
+        {"name": "body", "type": "text", "nullable": false}
+      ],
+      "foreign_keys": [
+        {"columns": ["task_id"], "references_table": "tasks", "references_columns": ["id"]},
+        {"columns": ["author_id"], "references_table": "users", "references_columns": ["id"]}
+      ]
+    },
+    {
+      "name": "task_labels",
+      "comment": "Join table between tasks and labels",
+      "columns": [
+        {"name": "task_id", "type": "uuid", "nullable": false},
+        {"name": "label_id", "type": "uuid", "nullable": false}
+      ],
+      "primary_key": ["task_id", "label_id"],
+      "foreign_keys": [
+        {"columns": ["task_id"], "references_table": "tasks", "references_columns": ["id"]},
+        {"columns": ["label_id"], "references_table": "labels", "references_columns": ["id"]}
+      ]
+    },
+    {
+      "name": "labels",
+      "columns": [
+        {"name": "id", "type": "uuid", "primary_key": true, "nullable": false},
+        {"name": "team_id", "type": "uuid", "nullable": false},
+        {"name": "name", "type": "text", "nullable": false},
+        {"name": "color", "type": "text"}
+      ],
+      "foreign_keys": [
+        {"columns": ["team_id"], "references_table": "teams", "references_columns": ["id"]}
+      ]
+    },
+    {
+      "name": "attachments",
+      "columns": [
+        {"name": "id", "type": "uuid", "primary_key": true, "nullable": false},
+        {"name": "task_id", "type": "uuid", "nullable": false},
+        {"name": "file_name", "type": "text", "nullable": false},
+        {"name": "byte_size", "type": "integer"}
+      ],
+      "foreign_keys": [
+        {"columns": ["task_id"], "references_table": "tasks", "references_columns": ["id"]}
+      ]
+    },
+    {
+      "name": "invoices",
+      "columns": [
+        {"name": "id", "type": "uuid", "primary_key": true, "nullable": false},
+        {"name": "organization_id", "type": "uuid", "nullable": false},
+        {"name": "amount_cents", "type": "integer", "nullable": false},
+        {"name": "status", "type": "text", "nullable": false}
+      ],
+      "foreign_keys": [
+        {"columns": ["organization_id"], "references_table": "organizations", "references_columns": ["id"]}
+      ]
+    },
+    {
+      "name": "invoice_line_items",
+      "columns": [
+        {"name": "id", "type": "uuid", "primary_key": true, "nullable": false},
+        {"name": "invoice_id", "type": "uuid", "nullable": false},
+        {"name": "description", "type": "text", "nullable": false},
+        {"name": "amount_cents", "type": "integer", "nullable": false}
+      ],
+      "foreign_keys": [
+        {"columns": ["invoice_id"], "references_table": "invoices", "references_columns": ["id"]}
+      ]
+    },
+    {
+      "name": "payments",
+      "columns": [
+        {"name": "id", "type": "uuid", "primary_key": true, "nullable": false},
+        {"name": "invoice_id", "type": "uuid", "nullable": false},
+        {"name": "method", "type": "text", "nullable": false},
+        {"name": "amount_cents", "type": "integer", "nullable": false}
+      ],
+      "foreign_keys": [
+        {"columns": ["invoice_id"], "references_table": "invoices", "references_columns": ["id"]}
+      ]
+    },
+    {
+      "name": "audit_log",
+      "comment": "Deliberately not linked to anything above one hop away",
+      "columns": [
+        {"name": "id", "type": "uuid", "primary_key": true, "nullable": false},
+        {"name": "actor_id", "type": "uuid", "nullable": false},
+        {"name": "action", "type": "text", "nullable": false},
+        {"name": "occurred_at", "type": "timestamptz", "nullable": false}
+      ],
+      "foreign_keys": [
+        {"columns": ["actor_id"], "references_table": "users", "references_columns": ["id"]}
+      ]
+    },
+    {
+      "name": "webhooks",
+      "columns": [
+        {"name": "id", "type": "uuid", "primary_key": true, "nullable": false},
+        {"name": "organization_id", "type": "uuid", "nullable": false},
+        {"name": "url", "type": "text", "nullable": false},
+        {"name": "secret", "type": "text"}
+      ],
+      "foreign_keys": [
+        {"columns": ["organization_id"], "references_table": "organizations", "references_columns": ["id"]}
+      ]
+    },
+    {
+      "name": "api_keys",
+      "columns": [
+        {"name": "id", "type": "uuid", "primary_key": true, "nullable": false},
+        {"name": "organization_id", "type": "uuid", "nullable": false},
+        {"name": "hashed_key", "type": "text", "nullable": false},
+        {"name": "created_at", "type": "timestamptz", "nullable": false}
+      ],
+      "foreign_keys": [
+        {"columns": ["organization_id"], "references_table": "organizations", "references_columns": ["id"]}
+      ]
+    }
+  ]
+}

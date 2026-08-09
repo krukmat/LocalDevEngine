@@ -1,0 +1,168 @@
+{
+  "small": [
+    {
+      "kind": "table_name",
+      "query": "Add a discount code field to orders",
+      "with_fast_path": false,
+      "with_unknown_count": 17,
+      "without_fast_path": false,
+      "without_unknown_count": 11,
+      "without_unknown_tables": [
+        "core.database",
+        "datetime",
+        "decimal",
+        "domain",
+        "domain.discount_errors",
+        "enum",
+        "models.order",
+        "services.promotion_engine",
+        "sqlalchemy.exc",
+        "sqlalchemy.orm",
+        "statement"
+      ],
+      "without_unknown_columns": []
+    },
+    {
+      "kind": "column_only",
+      "query": "Index the sku column for faster lookup",
+      "with_fast_path": false,
+      "with_unknown_count": 5,
+      "without_fast_path": false,
+      "without_unknown_count": 5,
+      "without_unknown_tables": [
+        "Global",
+        "SKU",
+        "current",
+        "pathlib",
+        "your"
+      ],
+      "without_unknown_columns": []
+    },
+    {
+      "kind": "generic",
+      "query": "Improve error handling in the api",
+      "with_fast_path": true,
+      "with_unknown_count": null,
+      "without_fast_path": true,
+      "without_unknown_count": 5,
+      "without_unknown_tables": [
+        "ad",
+        "code",
+        "three",
+        "two",
+        "validation"
+      ],
+      "without_unknown_columns": []
+    }
+  ],
+  "medium": [
+    {
+      "kind": "table_name",
+      "query": "Add a due date field to tasks",
+      "with_fast_path": false,
+      "with_unknown_count": 10,
+      "without_fast_path": false,
+      "without_unknown_count": 14,
+      "without_unknown_tables": [
+        "JWT",
+        "app.database",
+        "app.schemas",
+        "app.services",
+        "auth",
+        "datetime",
+        "fastapi",
+        "pydantic",
+        "security",
+        "sqlalchemy",
+        "sqlalchemy.ext",
+        "sqlalchemy.orm"
+      ],
+      "without_unknown_columns": [
+        "tasks.py",
+        "tasks.scalars"
+      ]
+    },
+    {
+      "kind": "column_only",
+      "query": "Add an index on the amount_cents column",
+      "with_fast_path": false,
+      "with_unknown_count": 6,
+      "without_fast_path": false,
+      "without_unknown_count": 5,
+      "without_unknown_tables": [
+        "_load",
+        "disk",
+        "memory.base",
+        "metadata",
+        "preferred"
+      ],
+      "without_unknown_columns": []
+    },
+    {
+      "kind": "generic",
+      "query": "Improve logging across the service",
+      "with_error": "status=failed",
+      "with_status": "failed",
+      "without_error": "status=failed",
+      "without_status": "failed"
+    }
+  ],
+  "hostile_naming": [
+    {
+      "kind": "table_name",
+      "query": "Add a phone number column to Cliente",
+      "with_fast_path": false,
+      "with_unknown_count": 7,
+      "without_fast_path": false,
+      "without_unknown_count": 16,
+      "without_unknown_tables": [
+        "ORM",
+        "alembic",
+        "database.base",
+        "datetime",
+        "dict",
+        "e",
+        "external",
+        "models.cliente",
+        "pydantic",
+        "schemas.cliente",
+        "sqlalchemy",
+        "sqlalchemy.exc",
+        "sqlalchemy.orm",
+        "your"
+      ],
+      "without_unknown_columns": [
+        "Cliente.id",
+        "Cliente.py"
+      ]
+    },
+    {
+      "kind": "column_only",
+      "query": "Add an index on the montoTotal column",
+      "with_fast_path": false,
+      "with_unknown_count": 2,
+      "without_fast_path": false,
+      "without_unknown_count": 9,
+      "without_unknown_tables": [
+        "base",
+        "candidate_metadata",
+        "collections",
+        "current",
+        "disk",
+        "persistent",
+        "primary",
+        "scratch",
+        "secondary"
+      ],
+      "without_unknown_columns": []
+    },
+    {
+      "kind": "generic",
+      "query": "Clean up unused configuration files",
+      "with_fast_path": false,
+      "with_unknown_count": 2,
+      "without_error": "status=timeout",
+      "without_status": "timeout"
+    }
+  ]
+}

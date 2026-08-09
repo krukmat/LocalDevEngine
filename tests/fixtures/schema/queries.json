@@ -1,0 +1,54 @@
+{
+  "_comment": "Test queries for Fase 3 (docs/plan-schema-grounding.md sec 5.2). Three queries per fixture, each exercising a different selection.select_tables() strategy: a table-name match, a column-only match, and a generic query with no relational terms (forces strategy=\"all\"). 'notes' records the selection behavior observed with select_tables(max_tables=12, fk_expansion_depth=1) at the time these queries were picked (tests/fixtures/schema/, this file's sibling snapshots) -- it documents intent, it is not asserted by any test.",
+  "small": [
+    {
+      "kind": "table_name",
+      "query": "Add a discount code field to orders",
+      "notes": "lexical; matched=[order_items, orders], related=[products, users]"
+    },
+    {
+      "kind": "column_only",
+      "query": "Index the sku column for faster lookup",
+      "notes": "lexical; matched=[products], related=[order_items] via FK closure"
+    },
+    {
+      "kind": "generic",
+      "query": "Improve error handling in the api",
+      "notes": "no relational terms; strategy=all"
+    }
+  ],
+  "medium": [
+    {
+      "kind": "table_name",
+      "query": "Add a due date field to tasks",
+      "notes": "lexical; matched=[task_comments, task_labels, tasks, attachments], related=[labels, projects, users]. Deliberately avoids the earlier 'update task status' query, which also matched invoices via the shared status column and mixed two FK clusters."
+    },
+    {
+      "kind": "column_only",
+      "query": "Add an index on the amount_cents column",
+      "notes": "lexical; matched=[invoice_line_items, invoices, payments], related=[organizations]. amount_cents does not appear in any table name, only columns."
+    },
+    {
+      "kind": "generic",
+      "query": "Improve logging across the service",
+      "notes": "no relational terms; strategy=all"
+    }
+  ],
+  "hostile_naming": [
+    {
+      "kind": "table_name",
+      "query": "Add a phone number column to Cliente",
+      "notes": "lexical; matched=[Cliente, commandes, facturas] -- commandes/facturas pulled in via the 'cliente' token inside their id_cliente/clienteId columns, not via declared FK (facturas->Cliente has no declared FK). related=[commande_lignes] via commandes' real FK. Demonstrates convention-agnostic, FK-independent lexical matching."
+    },
+    {
+      "kind": "column_only",
+      "query": "Add an index on the montoTotal column",
+      "notes": "lexical; matched=[facturas] only -- single clean column-only match"
+    },
+    {
+      "kind": "generic",
+      "query": "Clean up unused configuration files",
+      "notes": "no relational terms; strategy=all"
+    }
+  ]
+}

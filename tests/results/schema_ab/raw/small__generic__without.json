@@ -1,0 +1,95 @@
+{
+  "schema_version": "1.1",
+  "request_id": "088d44280a3c",
+  "status": "completed",
+  "query": "Improve error handling in the api",
+  "query_sha256": "0e954157098237922ae86e462cf1b19e3c68ae01948e102c4ffd4e126f0f1a9d",
+  "started_at": "2026-08-09T13:15:15.233584+00:00",
+  "finished_at": "2026-08-09T13:15:58.929471+00:00",
+  "duration_ms": 43695.9,
+  "macro_iteration": 1,
+  "outcome": {
+    "router_decision": "ERROR_REACTION",
+    "fast_path": true,
+    "rag": {
+      "ran": false
+    },
+    "schema_grounding": {
+      "ran": false
+    },
+    "context_budget": {
+      "ran": false
+    },
+    "design_gate": {
+      "ran": false
+    },
+    "implementation_check": {
+      "ran": false
+    },
+    "closing_report": {
+      "ran": false
+    }
+  },
+  "config_fingerprint": {
+    "models": {
+      "router": "phi3:mini",
+      "manager": "gemma4:26b-a4b-it-qat",
+      "architect": "qwen3.6:35b-a3b",
+      "implementer": "qwen3.6:35b-a3b",
+      "qa_auditor": "gemma4:26b-a4b-it-qat",
+      "copilot": "granite-code:8b"
+    },
+    "max_qa_iterations": 2,
+    "closing_report_enabled": true,
+    "retrieval": {
+      "top_k": 5,
+      "min_score": 0.0,
+      "max_context_chars": 6000,
+      "breakdown_reserve_chars": 1200
+    },
+    "schema_grounding": {
+      "max_tables": 12,
+      "max_chars": 4000,
+      "fk_expansion_depth": 1,
+      "identifier_check": true
+    },
+    "request": {
+      "output_contract": null,
+      "schema_grounding": false,
+      "schema_tables": 0
+    }
+  },
+  "artifacts": {
+    "implementation": "To effectively improve API error handling, we need to move away from ad-hoc `try/catch` blocks and inconsistent response formats toward a centralized, standardized error management system. \n\nI have broken this project down into two distinct workstreams: **Phase 1 (Architecture & Design)** for the Architect and **Phase 2 (Implementation & Integration)** for the Implementer.\n\n---\n\n### **Project Goal**\nStandardize API error responses, implement global error catching, ensure sensitive data leakage is prevented in production, and improve observability through structured logging.\n\n---\n\n### **Phase 1: Architecture & Design (Architect)**\n*Focus: Defining standards, schemas, and the structural pattern.*\n\n#### **1.1 Define Standard Error Response Schema**\nDesign a consistent JSON structure that all error responses must follow. The schema should be predictable for frontend/client consumption.\n*   **Requirement:** Ensure the payload includes:\n    *   `timestamp`: ISO 8601 string.\n    *   `status`: HTTP status code (integer).\n    *   `error_code`: A unique, human-readable internal error constant (e.g., `USER_NOT_FOUND`).\n    *   `message`: A developer-friendly message.\n    *   `details`: (Optional) An array of specific validation errors (crucial for 400 Bad Request).\n\n#### **1.2 Design Status Code Mapping Logic**\nCreate a mapping matrix between business logic exceptions and HTTP status codes.\n*   **Task:** Categorize all potential application errors into three buckets:\n    *   **Client Errors (4xx):** Validation errors, unauthorized access, resource not found.\n    *   **Server Errors (5xx):** Database connection failures, third-party API timeouts, unhandled exceptions.\n    *   **Conflict/State Errors (409/422):** Business logic violations (e.g., \"Email already exists\").\n\n#### **1.3 Define Logging & Observability Strategy**\nEstablish how errors are recorded without compromising security.\n*   **Requirement:** Distinguish between **Operational Errors** (expected, e.g., invalid login) and **Programmer Errors** (unexpected, e.g., `null` pointer exception).\n*   **Task:** Define metadata requirements for logs: Include `request_id`, `user_id`, and `stack_trace` (for 5xx only), but ensure these are stripped before reaching the client in production.\n\n---\n\n### **Phase 2: Implementation & Integration (Implementer)**\n*Focus: Translating the architecture into code.*\n\n#### **2.1 Develop Custom Error Classes**\nCreate a hierarchy of custom error classes to allow for precise catching and type checking.\n*   **Instruction:** Create a base `AppError` class extending the native Error object.\n*   **Subclasses:** Implement `ValidationError`, `NotFoundError`, `UnauthorizedError`, and `InternalServerError`.\n*   **Requirement:** Each subclass must accept the `statusCode` and `errorCode` defined by the Architect.\n\n#### **2.2 Build Global Error Handling Middleware**\nImplement a centralized interceptor/middleware to catch all errors that escape local `try/catch` blocks.\n*   **Instruction:** \n    1.  Create a middleware function that intercepts any error passed to `next(err)` (in Express) or equivalent in your framework.\n    2.  Logic: If error is an instance of `AppError`, return the specific status/message. If it is an unknown error, mask it as a generic \"Internal Server Error\" and log the real error for developers.\n    3.  **Security Check:** Ensure that if `NODE_ENV !== 'production'`, the stack trace is included in the response; otherwise, omit it entirely.\n\n#### **2.3 Refactor Endpoint Logic (Incremental Migration)**\nClean up existing controllers to use the new standardized pattern.\n*   **Instruction:** \n    1.  Remove redundant `res.status(500).send(...)` calls within individual routes.\n    2.  Replace them with a direct throw of your custom error classes: `throw new NotFoundError('User not found')`.\n    3.  Update validation logic (e.g., Joi/Zod) to map validation failures directly into the standardized `details` array in the schema.\n\n#### **2.4 Integrate Structured Logging**\nConnect the error middleware to a logging utility (e.g., Winston, Pino).\n*   **Instruction:** Ensure every 5xx error triggers an `error` level log containing the full context (`request_id`, method, URL, and stack trace), while 4xx errors are logged as `warn` or `info`.\n\n---\n\n### **Success Criteria (Definition of Done)**\n1.  [ ] All API responses follow the exact same JSON structure for errors.\n2.  [ ] No 500-level error leaks a database schema or file path in the production response.\n3.  [ ] All validation errors return an array of specific field failures (400).\n4.  [ ] Every unhandled exception is caught by the global middleware and logged with a `request_id`."
+  },
+  "trace": [
+    {
+      "request_id": "088d44280a3c",
+      "stage": "routing",
+      "role": "router",
+      "model": "phi3:mini",
+      "attempt": null,
+      "duration_ms": 2094.8,
+      "verdict": null,
+      "decision": "ERROR_REACTION"
+    },
+    {
+      "request_id": "088d44280a3c",
+      "stage": "fast_path",
+      "role": "manager",
+      "model": "gemma4:26b-a4b-it-qat",
+      "attempt": null,
+      "duration_ms": 41600.4,
+      "verdict": null
+    }
+  ],
+  "error": null,
+  "plan": null,
+  "implementation": "To effectively improve API error handling, we need to move away from ad-hoc `try/catch` blocks and inconsistent response formats toward a centralized, standardized error management system. \n\nI have broken this project down into two distinct workstreams: **Phase 1 (Architecture & Design)** for the Architect and **Phase 2 (Implementation & Integration)** for the Implementer.\n\n---\n\n### **Project Goal**\nStandardize API error responses, implement global error catching, ensure sensitive data leakage is prevented in production, and improve observability through structured logging.\n\n---\n\n### **Phase 1: Architecture & Design (Architect)**\n*Focus: Defining standards, schemas, and the structural pattern.*\n\n#### **1.1 Define Standard Error Response Schema**\nDesign a consistent JSON structure that all error responses must follow. The schema should be predictable for frontend/client consumption.\n*   **Requirement:** Ensure the payload includes:\n    *   `timestamp`: ISO 8601 string.\n    *   `status`: HTTP status code (integer).\n    *   `error_code`: A unique, human-readable internal error constant (e.g., `USER_NOT_FOUND`).\n    *   `message`: A developer-friendly message.\n    *   `details`: (Optional) An array of specific validation errors (crucial for 400 Bad Request).\n\n#### **1.2 Design Status Code Mapping Logic**\nCreate a mapping matrix between business logic exceptions and HTTP status codes.\n*   **Task:** Categorize all potential application errors into three buckets:\n    *   **Client Errors (4xx):** Validation errors, unauthorized access, resource not found.\n    *   **Server Errors (5xx):** Database connection failures, third-party API timeouts, unhandled exceptions.\n    *   **Conflict/State Errors (409/422):** Business logic violations (e.g., \"Email already exists\").\n\n#### **1.3 Define Logging & Observability Strategy**\nEstablish how errors are recorded without compromising security.\n*   **Requirement:** Distinguish between **Operational Errors** (expected, e.g., invalid login) and **Programmer Errors** (unexpected, e.g., `null` pointer exception).\n*   **Task:** Define metadata requirements for logs: Include `request_id`, `user_id`, and `stack_trace` (for 5xx only), but ensure these are stripped before reaching the client in production.\n\n---\n\n### **Phase 2: Implementation & Integration (Implementer)**\n*Focus: Translating the architecture into code.*\n\n#### **2.1 Develop Custom Error Classes**\nCreate a hierarchy of custom error classes to allow for precise catching and type checking.\n*   **Instruction:** Create a base `AppError` class extending the native Error object.\n*   **Subclasses:** Implement `ValidationError`, `NotFoundError`, `UnauthorizedError`, and `InternalServerError`.\n*   **Requirement:** Each subclass must accept the `statusCode` and `errorCode` defined by the Architect.\n\n#### **2.2 Build Global Error Handling Middleware**\nImplement a centralized interceptor/middleware to catch all errors that escape local `try/catch` blocks.\n*   **Instruction:** \n    1.  Create a middleware function that intercepts any error passed to `next(err)` (in Express) or equivalent in your framework.\n    2.  Logic: If error is an instance of `AppError`, return the specific status/message. If it is an unknown error, mask it as a generic \"Internal Server Error\" and log the real error for developers.\n    3.  **Security Check:** Ensure that if `NODE_ENV !== 'production'`, the stack trace is included in the response; otherwise, omit it entirely.\n\n#### **2.3 Refactor Endpoint Logic (Incremental Migration)**\nClean up existing controllers to use the new standardized pattern.\n*   **Instruction:** \n    1.  Remove redundant `res.status(500).send(...)` calls within individual routes.\n    2.  Replace them with a direct throw of your custom error classes: `throw new NotFoundError('User not found')`.\n    3.  Update validation logic (e.g., Joi/Zod) to map validation failures directly into the standardized `details` array in the schema.\n\n#### **2.4 Integrate Structured Logging**\nConnect the error middleware to a logging utility (e.g., Winston, Pino).\n*   **Instruction:** Ensure every 5xx error triggers an `error` level log containing the full context (`request_id`, method, URL, and stack trace), while 4xx errors are logged as `warn` or `info`.\n\n---\n\n### **Success Criteria (Definition of Done)**\n1.  [ ] All API responses follow the exact same JSON structure for errors.\n2.  [ ] No 500-level error leaks a database schema or file path in the production response.\n3.  [ ] All validation errors return an array of specific field failures (400).\n4.  [ ] Every unhandled exception is caught by the global middleware and logged with a `request_id`.",
+  "fast_path": true,
+  "qa_approved": null,
+  "qa_feedback": null,
+  "breakdown": null,
+  "closing_report": null,
+  "deviation": null
+}

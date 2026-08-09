@@ -1,0 +1,88 @@
+{
+  "dialect": "mysql",
+  "tables": [
+    {
+      "name": "Cliente",
+      "comment": "Customer — Spanish name, PascalCase, singular",
+      "columns": [
+        {"name": "id_cliente", "type": "int", "primary_key": true, "nullable": false},
+        {"name": "nombre_completo", "type": "varchar(255)", "nullable": false},
+        {"name": "correo_electronico", "type": "varchar(255)"}
+      ]
+    },
+    {
+      "name": "facturas",
+      "comment": "Invoices — snake_case, plural, Spanish, no declared FK to Cliente",
+      "columns": [
+        {"name": "id", "type": "int", "primary_key": true, "nullable": false},
+        {"name": "clienteId", "type": "int", "nullable": false, "comment": "References Cliente.id_cliente but no FK declared"},
+        {"name": "montoTotal", "type": "decimal(10,2)", "nullable": false},
+        {"name": "fecha_emision", "type": "date", "nullable": false}
+      ]
+    },
+    {
+      "name": "ProductInventory",
+      "comment": "PascalCase, English, compound noun with no separator boundary for 'Inventory'",
+      "columns": [
+        {"name": "inventoryId", "type": "int", "primary_key": true, "nullable": false},
+        {"name": "productSKU", "type": "varchar(64)", "nullable": false},
+        {"name": "stockQuantity", "type": "int", "nullable": false}
+      ]
+    },
+    {
+      "name": "warehouse_locations",
+      "comment": "snake_case, English, FK declared to ProductInventory using a different casing convention",
+      "columns": [
+        {"name": "location_id", "type": "int", "primary_key": true, "nullable": false},
+        {"name": "inventory_id", "type": "int", "nullable": false},
+        {"name": "aisle", "type": "varchar(16)"},
+        {"name": "shelf", "type": "varchar(16)"}
+      ],
+      "foreign_keys": [
+        {"columns": ["inventory_id"], "references_table": "ProductInventory", "references_columns": ["inventoryId"]}
+      ]
+    },
+    {
+      "name": "MITARBEITER",
+      "comment": "German, ALL CAPS — 'employees'",
+      "columns": [
+        {"name": "PERSONALNUMMER", "type": "int", "primary_key": true, "nullable": false},
+        {"name": "NACHNAME", "type": "varchar(255)", "nullable": false},
+        {"name": "ABTEILUNG", "type": "varchar(255)"}
+      ]
+    },
+    {
+      "name": "t3_xk_legacy",
+      "comment": "Opaque legacy code name, no linguistic signal at all, no declared FK",
+      "columns": [
+        {"name": "pk", "type": "int", "primary_key": true, "nullable": false},
+        {"name": "fk_emp", "type": "int", "comment": "References MITARBEITER.PERSONALNUMMER but no FK declared"},
+        {"name": "val", "type": "text"}
+      ]
+    },
+    {
+      "name": "commande_lignes",
+      "comment": "French, snake_case — 'order lines'",
+      "columns": [
+        {"name": "ligne_id", "type": "int", "primary_key": true, "nullable": false},
+        {"name": "commande_id", "type": "int", "nullable": false},
+        {"name": "quantite", "type": "int", "nullable": false}
+      ],
+      "foreign_keys": [
+        {"columns": ["commande_id"], "references_table": "commandes", "references_columns": ["commande_id"]}
+      ]
+    },
+    {
+      "name": "commandes",
+      "comment": "French, snake_case plural — 'orders'",
+      "columns": [
+        {"name": "commande_id", "type": "int", "primary_key": true, "nullable": false},
+        {"name": "id_cliente", "type": "int", "nullable": false},
+        {"name": "statut", "type": "varchar(32)"}
+      ],
+      "foreign_keys": [
+        {"columns": ["id_cliente"], "references_table": "Cliente", "references_columns": ["id_cliente"]}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,95 @@
+{
+  "schema_version": "1.1",
+  "request_id": "6475da71dd6d",
+  "status": "completed",
+  "query": "Improve error handling in the api",
+  "query_sha256": "0e954157098237922ae86e462cf1b19e3c68ae01948e102c4ffd4e126f0f1a9d",
+  "started_at": "2026-08-09T13:14:35.443538+00:00",
+  "finished_at": "2026-08-09T13:15:15.037120+00:00",
+  "duration_ms": 39593.6,
+  "macro_iteration": 1,
+  "outcome": {
+    "router_decision": "ERROR_REACTION",
+    "fast_path": true,
+    "rag": {
+      "ran": false
+    },
+    "schema_grounding": {
+      "ran": false
+    },
+    "context_budget": {
+      "ran": false
+    },
+    "design_gate": {
+      "ran": false
+    },
+    "implementation_check": {
+      "ran": false
+    },
+    "closing_report": {
+      "ran": false
+    }
+  },
+  "config_fingerprint": {
+    "models": {
+      "router": "phi3:mini",
+      "manager": "gemma4:26b-a4b-it-qat",
+      "architect": "qwen3.6:35b-a3b",
+      "implementer": "qwen3.6:35b-a3b",
+      "qa_auditor": "gemma4:26b-a4b-it-qat",
+      "copilot": "granite-code:8b"
+    },
+    "max_qa_iterations": 2,
+    "closing_report_enabled": true,
+    "retrieval": {
+      "top_k": 5,
+      "min_score": 0.0,
+      "max_context_chars": 6000,
+      "breakdown_reserve_chars": 1200
+    },
+    "schema_grounding": {
+      "max_tables": 12,
+      "max_chars": 4000,
+      "fk_expansion_depth": 1,
+      "identifier_check": true
+    },
+    "request": {
+      "output_contract": null,
+      "schema_grounding": true,
+      "schema_tables": 4
+    }
+  },
+  "artifacts": {
+    "implementation": "To transform the high-level goal of **\"Improving error handling in the API\"** into an actionable project, I have broken this down into two distinct phases: **The Design Phase (Architect)** and **The Execution Phase (Implementer)**.\n\n---\n\n# Project Charter: API Error Handling Standardization\n**Objective:** Implement a centralized, standardized, and secure error-handling mechanism to improve developer experience (DX), ensure consistent client responses, and enhance observability via logging.\n\n---\n\n## Phase 1: Design & Specification\n**Primary Stakeholder:** Architect  \n**Goal:** Define the \"Contract\" for errors so that both frontend and backend teams have predictable behavior.\n\n### 1.1 Define Error Response Schema\n*   [ ] **Standardize Payload Structure:** Define a consistent JSON object for all error responses (e.g., following RFC 7807 - Problem Details for HTTP APIs).\n    *   *Requirement:* Must include `type` (URI), `title` (short summary), `status` (HTTP code), `detail` (human-readable message), and `instance` (request ID/trace ID).\n*   [ ] **Define Error Categories:** Categorize errors into:\n    *   **Client Errors (4xx):** Validation errors, Authentication, Resource Not Found.\n    *   **Server Errors (5xx):** Database timeouts, Third-party API failures, Uncaught exceptions.\n\n### 1.2 Define HTTP Status Code Mapping\n*   [ ] **Create a Mapping Matrix:** Explicitly map application-level logic to HTTP status codes:\n    *   `InsufficientPermissions` $\\rightarrow$ `403 Forbidden`\n    *   `ResourceNotFound` $\\rightarrow$ `404 Not Found`\n    *   `ValidationError` $\\rightarrow$ `422 Unprocessable Entity` (or 400)\n\n### 1.3 Security & Observability Strategy\n*   [ ] **Data Leakage Prevention Policy:** Define rules to ensure stack traces and sensitive DB queries are stripped from production responses.\n*   [ ] **Logging Schema Design:** Specify what metadata must be captured in logs for every error (e.g., UserID, RequestID, Timestamp, Endpoint, Error Code).\n\n---\n\n## Phase 2: Implementation & Integration\n**Primary Stakeholder:** Implementer  \n**Goal:** Translate the Architect’s specifications into functional code across the codebase.\n\n### 2.1 Core Infrastructure Setup\n*   [ ] **Custom Exception Hierarchy:** Create a base `AppException` class and specialized subclasses (e.g., `NotFoundException`, `ValidationException`) to allow for specific catching in middleware.\n*   [ ] **Global Error Middleware/Interceptor:** Implement a centralized middleware component that:\n    1. Intercepts all unhandled exceptions.\n    2. Maps the custom exception to the defined JSON schema.\n    3. Generates/Attaches a `Correlation ID` for tracking.\n    4. Logs the error with the appropriate severity level (Warn vs. Error).\n\n### 2.2 Refactoring & Application\n*   [ ] **Standardize Validation Errors:** Replace manual `if/else` return statements in controllers with a centralized validation interceptor that returns standardized 422 errors.\n*   [ ] **Refactor Controller Logic:** Update existing endpoints to `throw` specific custom exceptions rather than returning error objects manually. This ensures the middleware handles the response consistently.\n\n### 2.3 Observability Integration\n*   [ ] **Log Implementation:** Integrate the logging mechanism into the global handler. Ensure \"500 Internal Server Error\" triggers an `Error` level log, while \"404 Not Found\" triggers a `Warning` or `Info` level log to prevent alert fatigue.\n\n---\n\n## Phase 3: Validation & QA\n**Collaborative Task (Architect + Implementer)**\n\n### 3.1 Test Coverage\n*   [ ] **Unit Tests:** Verify that throwing a custom exception results in the correct HTTP code and JSON structure.\n*   [ ] **Integration Tests:** Perform \"Chaos Testing\" (e.g., force a database disconnection) to ensure the API returns a clean `500 Internal Server Error` instead of a raw stack trace.\n*   [ ] **Negative Path Testing:** Ensure all defined 4xx error scenarios return the exact schema designed in Phase 1.1.\n\n---\n\n### Deliverables Summary\n| Deliverable | Owner | Output Format |\n| :--- | :--- | :--- |\n| **Error Schema Spec** | Architect | Documentation (Markdown/Swagger) |\n| **Custom Exception Library** | Implementer | Code (New Modules) |\n| **Global Middleware** | Implementer | Code (Middleware Layer) |\n| **Standardized Error Log Sample** | Both | Example Log Entry (JSON) |"
+  },
+  "trace": [
+    {
+      "request_id": "6475da71dd6d",
+      "stage": "routing",
+      "role": "router",
+      "model": "phi3:mini",
+      "attempt": null,
+      "duration_ms": 162.5,
+      "verdict": null,
+      "decision": "ERROR_REACTION"
+    },
+    {
+      "request_id": "6475da71dd6d",
+      "stage": "fast_path",
+      "role": "manager",
+      "model": "gemma4:26b-a4b-it-qat",
+      "attempt": null,
+      "duration_ms": 39430.4,
+      "verdict": null
+    }
+  ],
+  "error": null,
+  "plan": null,
+  "implementation": "To transform the high-level goal of **\"Improving error handling in the API\"** into an actionable project, I have broken this down into two distinct phases: **The Design Phase (Architect)** and **The Execution Phase (Implementer)**.\n\n---\n\n# Project Charter: API Error Handling Standardization\n**Objective:** Implement a centralized, standardized, and secure error-handling mechanism to improve developer experience (DX), ensure consistent client responses, and enhance observability via logging.\n\n---\n\n## Phase 1: Design & Specification\n**Primary Stakeholder:** Architect  \n**Goal:** Define the \"Contract\" for errors so that both frontend and backend teams have predictable behavior.\n\n### 1.1 Define Error Response Schema\n*   [ ] **Standardize Payload Structure:** Define a consistent JSON object for all error responses (e.g., following RFC 7807 - Problem Details for HTTP APIs).\n    *   *Requirement:* Must include `type` (URI), `title` (short summary), `status` (HTTP code), `detail` (human-readable message), and `instance` (request ID/trace ID).\n*   [ ] **Define Error Categories:** Categorize errors into:\n    *   **Client Errors (4xx):** Validation errors, Authentication, Resource Not Found.\n    *   **Server Errors (5xx):** Database timeouts, Third-party API failures, Uncaught exceptions.\n\n### 1.2 Define HTTP Status Code Mapping\n*   [ ] **Create a Mapping Matrix:** Explicitly map application-level logic to HTTP status codes:\n    *   `InsufficientPermissions` $\\rightarrow$ `403 Forbidden`\n    *   `ResourceNotFound` $\\rightarrow$ `404 Not Found`\n    *   `ValidationError` $\\rightarrow$ `422 Unprocessable Entity` (or 400)\n\n### 1.3 Security & Observability Strategy\n*   [ ] **Data Leakage Prevention Policy:** Define rules to ensure stack traces and sensitive DB queries are stripped from production responses.\n*   [ ] **Logging Schema Design:** Specify what metadata must be captured in logs for every error (e.g., UserID, RequestID, Timestamp, Endpoint, Error Code).\n\n---\n\n## Phase 2: Implementation & Integration\n**Primary Stakeholder:** Implementer  \n**Goal:** Translate the Architect’s specifications into functional code across the codebase.\n\n### 2.1 Core Infrastructure Setup\n*   [ ] **Custom Exception Hierarchy:** Create a base `AppException` class and specialized subclasses (e.g., `NotFoundException`, `ValidationException`) to allow for specific catching in middleware.\n*   [ ] **Global Error Middleware/Interceptor:** Implement a centralized middleware component that:\n    1. Intercepts all unhandled exceptions.\n    2. Maps the custom exception to the defined JSON schema.\n    3. Generates/Attaches a `Correlation ID` for tracking.\n    4. Logs the error with the appropriate severity level (Warn vs. Error).\n\n### 2.2 Refactoring & Application\n*   [ ] **Standardize Validation Errors:** Replace manual `if/else` return statements in controllers with a centralized validation interceptor that returns standardized 422 errors.\n*   [ ] **Refactor Controller Logic:** Update existing endpoints to `throw` specific custom exceptions rather than returning error objects manually. This ensures the middleware handles the response consistently.\n\n### 2.3 Observability Integration\n*   [ ] **Log Implementation:** Integrate the logging mechanism into the global handler. Ensure \"500 Internal Server Error\" triggers an `Error` level log, while \"404 Not Found\" triggers a `Warning` or `Info` level log to prevent alert fatigue.\n\n---\n\n## Phase 3: Validation & QA\n**Collaborative Task (Architect + Implementer)**\n\n### 3.1 Test Coverage\n*   [ ] **Unit Tests:** Verify that throwing a custom exception results in the correct HTTP code and JSON structure.\n*   [ ] **Integration Tests:** Perform \"Chaos Testing\" (e.g., force a database disconnection) to ensure the API returns a clean `500 Internal Server Error` instead of a raw stack trace.\n*   [ ] **Negative Path Testing:** Ensure all defined 4xx error scenarios return the exact schema designed in Phase 1.1.\n\n---\n\n### Deliverables Summary\n| Deliverable | Owner | Output Format |\n| :--- | :--- | :--- |\n| **Error Schema Spec** | Architect | Documentation (Markdown/Swagger) |\n| **Custom Exception Library** | Implementer | Code (New Modules) |\n| **Global Middleware** | Implementer | Code (Middleware Layer) |\n| **Standardized Error Log Sample** | Both | Example Log Entry (JSON) |",
+  "fast_path": true,
+  "qa_approved": null,
+  "qa_feedback": null,
+  "breakdown": null,
+  "closing_report": null,
+  "deviation": null
+}

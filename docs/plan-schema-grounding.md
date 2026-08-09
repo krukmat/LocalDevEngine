@@ -1,8 +1,17 @@
 # Plan — Schema Grounding (contexto relacional determinista)
 
-**Estado:** Fases 0, R, 1 y 2 construidas y verificadas offline. Fase 3 (gate empírico) es
-la única tarea bloqueante activa — nada de Fase 4 se toca hasta que corra y dé un resultado.
-La deuda documental (§6) es independiente de ese gate y no espera a nada.
+**Estado:** Fases 0, R, 1 y 2 construidas y verificadas offline. Fase 3 (gate empírico) **corrió
+y concluyó NO-GO** — no por un empeoramiento limpio, sino porque `check_identifiers()` (el
+instrumento de medición del gate) resultó no ser confiable en ninguna dirección al auditar los
+recibos crudos a mano; ver [docs/fase3-decision.md](fase3-decision.md) para el detalle completo
+y qué haría falta para remedir. Por regla de este mismo documento (§5.3), **ninguna tarea de
+Fase 4 se hace**. La capa queda opt-in, sin costo para quien no la usa, tal como estaba tras la
+Fase 2. La deuda documental (§6) es independiente de ese gate y no espera a nada.
+
+**Continuación:** el alcance de la capa fue redefinido en
+[docs/plan-schema-conformance.md](plan-schema-conformance.md) — de persuadir al modelo a
+verificar su salida con parsers AST y un veredicto determinístico. Ese documento reemplaza a
+la Fase 4 (§5.3) y es donde sigue el trabajo.
 
 **Este documento es la única fuente de verdad del plan.** Reemplaza tanto a la versión
 original (que decía "cero líneas de código escritas" — ya no es cierto) como al documento
@@ -133,8 +142,8 @@ iban a validarlas (R.2/R.3, ver §5.1 tabla), y que sólo la Fase 3 puede confir
 | **R** — Refinamiento en papel (R1-R5) | Definir IR, selección, renderizado, extracción de identificadores, degradación | ✅ Done, pero **sin** las fixtures R.2/R.3 que iban a validarlo — resuelto por asunción |
 | **1** — Provider mínimo | `SchemaProvider`, parsing, wiring en el seam, `--schema-file`, config | ✅ Done |
 | **2** — Chequeo determinista de identificadores | Extracción + comparación contra el IR, reporta sin gatear | ✅ Done |
-| **3** — Gate empírico | Ver §5.2 | ⏳ **Pendiente, bloqueante** |
-| **4** — Solo si la Fase 3 lo justifica | Ver §5.3 | 🔒 Gated |
+| **3** — Gate empírico | Ver §5.2 | ✅ Done — **NO-GO**, ver [docs/fase3-decision.md](fase3-decision.md) |
+| **4** — Solo si la Fase 3 lo justifica | Ver §5.3 | 🔒 **Cerrada, no se hace** (3.5 = negativo) |
 
 ### 5.2 Fase 3 — el gate empírico *(bloqueante para todo lo demás)*
 
@@ -175,14 +184,22 @@ los números no es un gate, es una racionalización.
 | 3.2 | Queries de prueba | 3 por fixture: una que nombra la tabla, una que nombra sólo una columna, una que no nombra nada relacional (dispara `strategy: all`) | 3.1 |
 | 3.3 | Script de A/B | Corre cada (fixture, query) con y sin `--schema-file`, guarda ambos recibos, extrae `outcome.schema_grounding.identifier_check.unknown_count` — para la corrida sin schema, calcula el mismo número offline contra el snapshot que *no* se pasó | 3.1, 3.2, Fases 0/1/2 (ya satisfechas) |
 | 3.4 | Correr y registrar | 18 corridas de pipeline completo. A ~10-25 min cada una, es una tarde de máquina. Los recibos crudos se guardan, no sólo el resumen | 3.3 |
-| 3.5 | Decidir | Aplicar el criterio de continuación tal como está escrito arriba. Documentar el resultado sea cual sea | 3.4 |
+| 3.5 | Decidir | ✅ Hecho — **NO-GO**. Aplicado literal: 2 de 3 fixtures mejoran pero `small` empeora (22 vs 16), rompiendo "ninguna regresión en la tercera". Pero además, auditando a mano los 18 recibos crudos (no solo el resumen): `check_identifiers()` no solo cuenta ruido (imports, objetos de catálogo SQL, palabras sueltas) como desconocido — en 4 de 7 corridas `with` marcó el 100% de lo revisado como desconocido pese a uso correcto y verificado de las tablas mostradas (`known_tables=[]` con tablas correctas en el código). Descontando el ruido, solo sobreviven 2 eventos genuinos en 18 corridas, uno a favor de la hipótesis y uno en contra — sin base para afirmar mejora en ninguna dirección. El NO-GO se sostiene, pero por invalidez del instrumento de medición, no por un empeoramiento limpio. Detalle completo en [docs/fase3-decision.md](fase3-decision.md) | 3.4 |
 | 3.6 | Subir el smoke test offline al repo | Las 30 verificaciones offline hoy viven en el scratchpad de una sesión, no en el repo — nadie las puede volver a correr. Moverlas a `tests/` es lo que hace posible reusar 3.1-3.2 como fixtures reales de test, no solo de este gate | — (puede hacerse en paralelo a 3.1) |
 
 **Nota honesta sobre 3.1/3.2/3.6:** estas fixtures son el primer artefacto de test real del
 repo. La decisión consciente de no tener suite (documentada en `CLAUDE.md`) empieza a costar
 acá: no hay `tests/`, no hay runner, no hay convención. La Fase 3 la paga o no se hace.
 
-### 5.3 Fase 4 — solo si la Fase 3 da positivo
+### 5.3 Fase 4 — CERRADA, reemplazada por el alcance nuevo
+
+> **La Fase 4 tal como está en esta tabla no se hace.** La 3.5 concluyó NO-GO, y el análisis
+> mostró que el mecanismo de la capa (persuadir al modelo con un header de autoridad + medir
+> con un checker de regex) es el problema, no el parámetro a ajustar. El alcance redefinido
+> vive en **[docs/plan-schema-conformance.md](plan-schema-conformance.md)**: la capa pasa de
+> *prevenir* alucinaciones a *verificarlas mecánicamente* con parsers AST, veredicto
+> determinístico y gate opcional. La tabla de abajo se conserva como registro histórico de lo
+> que se había planeado.
 
 Ninguno de estos se toca hasta que 3.5 concluya que sí.
 
@@ -251,7 +268,16 @@ Se repiten acá porque ahora que la capa existe hay una tentación concreta de a
   problema conocido.
 - **RFM / RT-J / Context Broker / rol de BA/Analyst** del documento de recomendación
   original. No están diseñados ni planeados como continuación de este trabajo — si algún día
-  se quieren, es una conversación nueva de cero, no un ítem en cola.
+  se quieren, es una conversación nueva de cero, no un ítem en cola. Esa conversación ya tiene
+  su documento de apertura: [handoff-capa-contextual-objetivo.md](handoff-capa-contextual-objetivo.md).
+  **No cambia nada de este plan** — no diseña ninguna de esas piezas y las deja todas detrás
+  de la Fase 3 (§5.2). Dos cosas de ahí sí impactan acá y conviene leerlas antes de escribir
+  la tarea 3.1: (a) la Fase 3 **es**, literalmente, el gate que ese documento externo pone
+  antes de todo lo demás (su §13 "Do not proceed without a baseline" y su §14); (b) por eso
+  el harness de 3.3 conviene diseñarlo como runner de variantes con extractor de métricas por
+  recibo, y no como un script de un solo número — ver §2 del handoff para el costo de no
+  hacerlo. Ojo con la numeración: las "Phase 0-4" del documento externo **no** son las Fases
+  0-4 de este plan; la tabla de traducción está en §0 del handoff.
 - **Que el engine abra conexiones a BD.** Ver §3.1 y §7 (Seguridad).
 
 ---
