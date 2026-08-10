@@ -107,6 +107,15 @@ schema_grounding:
                            # exista `enforce` (C.7, diferido) — hoy solo cambia qué aparece
                            # listado en el reporte. Ver docs/plan-schema-conformance.md §4.
 
+# Advisor de seguridad Antares (opt-in por request: --cwe-check). Paralelo a
+# schema_grounding: solo se usa si el caller pide un CWE check explícito. No
+# hay roles.antares — el modelo chico local lo sirve el propio profile del CLI,
+# no ModelFactory. Ver docs/plan-security-advisor-antares.md.
+security_triage:
+  binary: "antares"          # resuelto por PATH
+  profile: "antares-local"   # profile del CLI que apunta al modelo pequeño local
+  timeout_seconds: 300       # ancla de la guía §5.2 ("300s, funcionó")
+
 storage:
   vector_db_path: "./memory/.vector_store"
   index_dir: "./memory/index"
