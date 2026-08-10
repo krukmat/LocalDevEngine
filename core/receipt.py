@@ -7,7 +7,10 @@ from typing import Any, Dict, List, Optional
 # prompt, not what one stage produced in isolation), and config_fingerprint gained a
 # "request" sub-block for per-request parameters. All additive — a 1.0 consumer reading
 # only the keys it knows keeps working.
-SCHEMA_VERSION = "1.1"
+# 1.1 -> 1.2: outcome gains security_triage (see docs/plan-security-advisor-antares.md),
+# config_fingerprint gains a security_triage config block, and request_params gains
+# cwe_checks_requested. Additive — a 1.1 consumer reading only known keys keeps working.
+SCHEMA_VERSION = "1.2"
 
 
 def query_sha256(query: str) -> str:
@@ -31,6 +34,7 @@ def build_config_fingerprint(
     pipeline = config.get("pipeline", {})
     retrieval = config.get("retrieval", {})
     schema_cfg = config.get("schema_grounding", {})
+    security_cfg = config.get("security_triage", {})
     return {
         "models": {role: cfg.get("model_name") for role, cfg in roles.items()},
         "max_qa_iterations": pipeline.get("max_qa_iterations", 2),
@@ -47,6 +51,11 @@ def build_config_fingerprint(
             "fk_expansion_depth": schema_cfg.get("fk_expansion_depth", 1),
             "identifier_check": schema_cfg.get("identifier_check", True),
             "allow_new_objects": schema_cfg.get("allow_new_objects", True),
+        },
+        "security_triage": {
+            "binary": security_cfg.get("binary", "antares"),
+            "profile": security_cfg.get("profile"),
+            "timeout_seconds": security_cfg.get("timeout_seconds", 300),
         },
         "request": request_params or {},
     }
