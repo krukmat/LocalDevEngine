@@ -1,0 +1,7 @@
+2026-08-11 21:07:55,827 INFO core.orchestrator [run_complex_task started (macro_iteration=1)]
+2026-08-11 21:07:57,850 INFO httpx [HTTP Request: POST http://localhost:11434/api/generate "HTTP/1.1 200 OK"]
+2026-08-11 21:07:57,851 INFO core.orchestrator [stage=routing role=router model=phi3:mini attempt=None duration_ms=2024.7]
+2026-08-11 21:07:57,852 INFO core.orchestrator [Router decision: SIMPLE_TASK]
+2026-08-11 21:07:57,852 INFO core.orchestrator [Router fast path (SIMPLE_TASK) — skipping RAG/Architect/Implementer/QA]
+2026-08-11 21:08:32,271 INFO httpx [HTTP Request: POST http://localhost:11434/api/generate "HTTP/1.1 200 OK"]
+2026-08-11 21:08:32,273 INFO core.orchestrator [stage=fast_path role=manager model=gemma4:26b-a4b-it-qat attempt=None duration_ms=34421.4]

@@ -443,6 +443,19 @@ receipt / output-contracts, apuntando a `docs/plan-security-advisor-antares.md`
 (T0). Depende de T1–T10 verificadas, para no documentar algo que todavía puede
 cambiar de forma.
 
+## Cierre (T0–T11)
+
+Todas las tareas están completas y verificadas. T9 (smoke test end-to-end) y
+T10 (checklist de verificación manual) se cerraron el 2026-08-11 contra tres
+corridas reales (Ollama + `antares` real, sin mocks) — ver
+[docs/t9-t10-verificacion-security-advisor.md](t9-t10-verificacion-security-advisor.md)
+para el detalle y [tests/results/security_triage_t9/](../tests/results/security_triage_t9/)
+para los receipts crudos. T11 quedó reflejado en `CLAUDE.md`. Única salvedad
+registrada: `status: "completed"` con el binario `antares` ausente del `PATH`
+está verificado por lectura de código + test unitario, no por una corrida en
+vivo con el binario removido — ver el cierre de T10 en el documento de
+verificación para el razonamiento completo.
+
 **T12. `README.md`.** Depende de T11 (mismo contenido, nivel usuario en vez de
 interno). Dos cambios puntuales, siguiendo el patrón ya usado ahí para
 `--schema-file`/`--output-contract`:
