@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Fake `antares` CLI for offline testing of context/antares/invoke.py.
+
+Speaks the same wire contract as the real CLI (docs/plan-security-advisor-antares.md
+§5.2): `antares tool query --stdin`, JSON request on stdin, JSON response on
+stdout, exit 0 or 2 for a valid report. Behavior keyed by the FAKE_ANTARES_MODE
+env var so a single fixture binary covers every terminal-state case.
+"""
+import json
+import os
+import sys
+import time
+
+mode = os.environ.get("FAKE_ANTARES_MODE", "exit0")
+assert sys.argv[1:4] == ["tool", "query", "--stdin"], sys.argv
+
+stdin_payload = sys.stdin.read()
+
+# Record the last request this process saw, so a test can assert on
+# cwd/env/stdin without parsing subprocess internals itself.
+record_path = os.environ.get("FAKE_ANTARES_RECORD")
+if record_path:
+    with open(record_path, "w") as f:
+        json.dump({
+            "stdin": stdin_payload,
+            "cwd": os.getcwd(),
+            "antares_data_dir": os.environ.get("ANTARES_DATA_DIR"),
+        }, f)
+
+if mode == "exit0":
+    print(json.dumps({"findings": []}))
+    sys.exit(0)
+elif mode == "exit2_findings":
+    print(json.dumps({"findings": [
+        {"title": "SQLi risk", "file_path": "app.py", "cwe_ids": ["CWE-89"],
+         "likelihood_of_exploit": "medium", "submission_rank": 1}
+    ]}))
+    sys.exit(2)
+elif mode == "exit1":
+    sys.stderr.write("fatal error\n")
+    sys.exit(1)
+elif mode == "bad_json":
+    print("not json")
+    sys.exit(0)
+elif mode == "path_traversal_finding":
+    print(json.dumps({"findings": [
+        {"title": "escape attempt", "file_path": "../../etc/passwd",
+         "cwe_ids": ["CWE-22"], "likelihood_of_exploit": "low", "submission_rank": None}
+    ]}))
+    sys.exit(0)
+elif mode == "oversized":
+    sys.stdout.write("x" * (2 * 1024 * 1024))
+    sys.exit(0)
+elif mode == "hang":
+    time.sleep(30)
+    sys.exit(0)
+else:
+    sys.exit(99)
