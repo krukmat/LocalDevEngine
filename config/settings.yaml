@@ -25,28 +25,37 @@ roles:
     priority: 2
 
   architect:
-    model_name: "qwen3.6:35b-a3b" # era qwen3.6:27b-q4_K_M (denso): 3/3 timeouts a 300s; este MoE completó el implementer en 123.1s
+    # Reviewer de fase 1 (design gate). Antes qwen3.6:35b-a3b (MoE, elegido por
+    # timeouts del denso qwen3.6:27b-q4_K_M en el rol de implementer, no en este).
+    # Cambiado a Muse Glimmer para separar el modelo que revisa del que implementa.
+    model_name: "muse-glimmer:30b-q4_K_M"
     capabilities: ["design", "reasoning"]
     priority: 3
-    think: false # qwen3.6 es "thinking"-capable; el chain-of-thought completo excedía 300s por llamada
+    think: false # muse-glimmer es "thinking"-capable (ver `ollama show`); mismo motivo
+                 # que abajo en implementer, el chain-of-thought completo puede exceder
+                 # request_timeout_seconds=300 por llamada.
 
   implementer:
-    model_name: "qwen3.6:35b-a3b"
+    # "Developer" del stack. Antes qwen3.6:35b-a3b (MoE) por timeouts del denso a
+    # 300s; ahora qwen3.6:27b-q4_K_M (denso) según decisión explícita — si reaparecen
+    # timeouts a request_timeout_seconds=300s, ver el historial en git log de este rol.
+    model_name: "qwen3.6:27b-q4_K_M"
     capabilities: ["coding", "implementation"]
     priority: 4
-    think: false # mismo motivo que architect (también qwen3.6, también thinking-capable)
+    think: false # qwen3.6 es "thinking"-capable; el chain-of-thought completo excedía
+                 # 300s por llamada con el mismo modelo en el rol de architect (ver commit
+                 # previo). El denso 27b no está medido en implementer todavía — si
+                 # aparecen timeouts pese a think:false, revisar acá primero.
 
   qa_auditor:
-    # era gemma3:27b (denso, 17GB): 157.8s en design_gate, el stage mas caro del
-    # pipeline. Este es MoE (~4B activos de 26B) e instruction-tuned, que es lo que
-    # QA necesita para respetar el formato VERDICT/FEEDBACK. Medido en el mismo run:
-    # gemma4 hizo task_breakdown en 22.7s mientras gemma3 tardaba 157.8s.
-    # Comparte tag con el manager: el pipeline baja de 4 modelos distintos a 3, y el
-    # auditor sigue siendo independiente del architect/implementer, que es lo que
-    # importa para que el gate valga algo.
-    model_name: "gemma4:26b-a4b-it-qat"
+    # Reviewer de fase 2 (implementation check) y también corre en fase 1 (design
+    # gate, junto con architect). Antes gemma4:26b-a4b-it-qat (compartía tag con
+    # manager); cambiado a Muse Glimmer para unificar el rol de reviewer en ambas
+    # fases bajo un solo modelo, independiente del architect/implementer.
+    model_name: "muse-glimmer:30b-q4_K_M"
     capabilities: ["verification", "compliance_check"]
     priority: 5
+    think: false # mismo motivo que architect (también muse-glimmer, también thinking-capable)
 
   copilot:
     model_name: "granite-code:8b"
