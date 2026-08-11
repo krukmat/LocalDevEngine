@@ -19,6 +19,12 @@ from context.schema import (
     render_schema_block,
     select_tables,
 )
+from context.antares import (
+    AntaresInvocationError,
+    materialize_implementation,
+    run_antares_query,
+)
+from dataclasses import asdict
 
 _VERDICT_RE = re.compile(r"VERDICT:\s*(APPROVED|NEEDS_REVISION)", re.IGNORECASE)
 _FEEDBACK_RE = re.compile(r"FEEDBACK:\s*(.*)", re.IGNORECASE | re.DOTALL)
@@ -456,6 +462,71 @@ class Orchestrator:
         summary = summary_match.group(1).strip() if summary_match else report_text.strip()
         return deviation_match.group(1).upper(), summary
 
+    async def _run_security_triage(
+        self,
+        cwe_checks: Optional[List[Tuple[str, str]]],
+        body: Dict[str, Any],
+        output_contract: Optional[str],
+        request_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Opt-in Antares security triage over the final implementation. Never
+        propagates an exception — a failure here can only degrade its own
+        outcome.security_triage block, never the pipeline's own status (I1,
+        docs/plan-security-advisor-antares.md).
+        """
+        requested = [{"cwe_id": c, "rationale": r} for c, r in (cwe_checks or [])]
+        if not cwe_checks:
+            return {
+                "ran": False, "terminal_state": "not-requested", "degraded": False,
+                "requested": [], "stdout_sha256": None, "findings": [],
+            }
+        if body["outcome"]["fast_path"]:
+            return {
+                "ran": False, "terminal_state": "snapshot-unavailable", "degraded": True,
+                "reason": "fast-path", "requested": requested, "stdout_sha256": None,
+                "findings": [],
+            }
+        implementation = body["artifacts"].get("implementation")
+        if not implementation:
+            return {
+                "ran": False, "terminal_state": "artifact-missing", "degraded": True,
+                "requested": requested, "stdout_sha256": None, "findings": [],
+            }
+        cfg = self.config.get("security_triage", {})
+        try:
+            with materialize_implementation(implementation, output_contract) as mat:
+                result = await run_antares_query(
+                    mat.snapshot_dir, mat.data_dir, cwe_checks,
+                    binary=cfg.get("binary", "antares"),
+                    profile=cfg.get("profile"),
+                    timeout_seconds=cfg.get("timeout_seconds", 300),
+                )
+            return {
+                "ran": True, "terminal_state": result.terminal_state,
+                "degraded": result.degraded, "requested": requested,
+                "stdout_sha256": result.stdout_sha256,
+                "findings": [asdict(f) for f in result.findings],
+            }
+        except AntaresInvocationError as e:
+            logger.warning(
+                "Security triage degraded: %s", e,
+                extra={"request_id": request_id, "stage": "security_triage"}
+            )
+            return {
+                "ran": True, "terminal_state": e.terminal_state, "degraded": True,
+                "requested": requested, "stdout_sha256": None, "findings": [],
+            }
+        except Exception:
+            logger.exception(
+                "Unexpected error during security triage",
+                extra={"request_id": request_id, "stage": "security_triage"}
+            )
+            return {
+                "ran": True, "terminal_state": "internal-error", "degraded": True,
+                "requested": requested, "stdout_sha256": None, "findings": [],
+            }
+
     async def run_complex_task(
         self,
         user_query: str,
@@ -465,6 +536,7 @@ class Orchestrator:
         macro_iteration: int = 1,
         output_contract: Optional[str] = None,
         schema_snapshot: Optional[SchemaSnapshot] = None,
+        cwe_checks: Optional[List[Tuple[str, str]]] = None,
     ) -> Dict[str, Any]:
         """
         Main workflow: Router -> (fast path | RAG -> Manager -> Architect<->QA design gate
@@ -503,6 +575,12 @@ class Orchestrator:
           SchemaSnapshotError into EXIT_USAGE), so a malformed snapshot never becomes a
           silently degraded run inside the pipeline. The engine never opens a database
           connection and never holds credentials — see docs/plan-schema-grounding.md §7.
+        - cwe_checks, if given (a list of (cwe_id, rationale) pairs), runs the opt-in
+          Antares security triage layer once against the final implementation, after
+          the pipeline body has already returned successfully — never inside the
+          asyncio.wait_for that bounds the main pipeline, and never able to turn a
+          completed run into a failed one (see docs/plan-security-advisor-antares.md,
+          invariant I1).
 
         Returns a receipt dict (see core/receipt.py / docs/plan-receipt-interface-callers.md):
         schema_version, request_id, status ("completed"|"failed"|"timeout"), query,
@@ -528,6 +606,7 @@ class Orchestrator:
             "output_contract": output_contract,
             "schema_grounding": schema_snapshot is not None,
             "schema_tables": len(schema_snapshot.tables) if schema_snapshot is not None else 0,
+            "cwe_checks_requested": [c for c, _ in (cwe_checks or [])],
         }
 
         try:
@@ -587,6 +666,55 @@ class Orchestrator:
                 "closing_report": None, "deviation": None, "macro_iteration": macro_iteration,
             })
             return rec
+
+        try:
+            # orchestration_timeout_seconds is the deadline asyncio.wait_for cancels
+            # against, not a hard kill: cancellation only requests that
+            # _run_security_triage's current await point raise CancelledError, and
+            # its synchronous filesystem cleanup plus invoke.py's own post-kill drain
+            # still run to completion before that propagates. Elapsed time can exceed
+            # this value — there is no hard ceiling in this PoC (see
+            # docs/plan-security-advisor-antares.md's own "not a production design"
+            # framing). Defaults to Antares's own timeout_seconds plus a fixed margin,
+            # so a slow-but-legitimate Antares run is never cancelled before its own
+            # configured timeout would have fired.
+            requested_for_degraded = [
+                {"cwe_id": c, "rationale": r} for c, r in (cwe_checks or [])
+            ]
+            security_triage_cfg = self.config.get("security_triage", {})
+            security_triage_timeout = security_triage_cfg.get(
+                "orchestration_timeout_seconds",
+                security_triage_cfg.get("timeout_seconds", 300) + 30,
+            )
+            security_triage = await asyncio.wait_for(
+                self._run_security_triage(cwe_checks, body, output_contract, request_id),
+                timeout=security_triage_timeout,
+            )
+            body["outcome"]["security_triage"] = security_triage
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Security triage orchestration timed out",
+                extra={"request_id": request_id, "stage": "security_triage"}
+            )
+            body["outcome"]["security_triage"] = {
+                "ran": True, "terminal_state": "timeout", "degraded": True,
+                "requested": requested_for_degraded, "stdout_sha256": None, "findings": [],
+            }
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Defense in depth: _run_security_triage already normalizes its own
+            # failures, but this covers config/body access and the wait_for wiring
+            # itself — the last line before I1 (Antares can never turn a completed
+            # run into a failed one).
+            logger.exception(
+                "Unexpected error orchestrating security triage",
+                extra={"request_id": request_id, "stage": "security_triage"}
+            )
+            body["outcome"]["security_triage"] = {
+                "ran": True, "terminal_state": "internal-error", "degraded": True,
+                "requested": [], "stdout_sha256": None, "findings": [],
+            }
 
         finished_at = receipt_mod.now()
         rec = receipt_mod.build_receipt(

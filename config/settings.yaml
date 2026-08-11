@@ -115,6 +115,11 @@ security_triage:
   binary: "antares"          # resuelto por PATH
   profile: "antares-local"   # profile del CLI que apunta al modelo pequeño local
   timeout_seconds: 300       # ancla de la guía §5.2 ("300s, funcionó")
+  # Cuánto espera run_complex_task antes de degradar outcome.security_triage
+  # (no un kill duro del trabajo en curso — ver el comentario en orchestrator.py
+  # junto a asyncio.wait_for). Debe ser mayor a timeout_seconds: un margen chico
+  # cortaría un análisis legítimo antes de que su propio timeout dispare.
+  orchestration_timeout_seconds: 330
 
 storage:
   vector_db_path: "./memory/.vector_store"

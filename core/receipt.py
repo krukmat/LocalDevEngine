@@ -56,6 +56,10 @@ def build_config_fingerprint(
             "binary": security_cfg.get("binary", "antares"),
             "profile": security_cfg.get("profile"),
             "timeout_seconds": security_cfg.get("timeout_seconds", 300),
+            "orchestration_timeout_seconds": security_cfg.get(
+                "orchestration_timeout_seconds",
+                security_cfg.get("timeout_seconds", 300) + 30,
+            ),
         },
         "request": request_params or {},
     }
