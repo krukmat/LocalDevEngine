@@ -3,7 +3,8 @@ import asyncio
 import json
 import logging
 import os
-from typing import List, Optional
+import re
+from typing import List, Optional, Tuple
 
 # Re-importamos las dependencias internas (la estructura depende de dónde ejecutes el script)
 try:
@@ -156,6 +157,7 @@ class DevOrchestratorCLI:
         quiet: bool = False,
         output_contract: Optional[str] = None,
         schema_snapshot=None,
+        cwe_checks: Optional[List[Tuple[str, str]]] = None,
     ) -> int:
         """Executes a single inquiry and exits. Never prompts — the macro-loop re-run
         offered after a closing report is a `chat`-only feature (see _maybe_offer_macro_rerun):
@@ -174,13 +176,16 @@ class DevOrchestratorCLI:
         - output_contract: forwarded to run_complex_task (see PromptRegistry.OUTPUT_CONTRACTS).
         - schema_snapshot: an already-parsed SchemaSnapshot (--schema-file was validated at
           argument-parse time), forwarded for deterministic relational grounding.
+        - cwe_checks: list of (cwe_id, rationale) pairs (--cwe-check was validated at
+          argument-parse time), forwarded to the opt-in Antares security triage stage
+          (see docs/plan-security-advisor-antares.md). Never gates the pipeline (I1).
         """
         stream_target = sys.stderr if as_json else sys.stdout
         on_chunk = None if quiet else self._make_stage_printer(file=stream_target)
         try:
             result = await self.orchestrator.run_complex_task(
                 query, on_chunk=on_chunk, output_contract=output_contract,
-                schema_snapshot=schema_snapshot,
+                schema_snapshot=schema_snapshot, cwe_checks=cwe_checks,
             )
         except ModelCallError as e:
             # Defensive: run_complex_task already catches ModelCallError internally and
@@ -307,6 +312,7 @@ def _parse_ask_args(argv: List[str]):
     opts = {
         "query": None, "as_json": False, "out_path": None, "quiet": False,
         "output_contract": None, "input_file": None, "schema_snapshot": None,
+        "cwe_checks": [],
     }
     i = 0
     positional: List[str] = []
@@ -349,6 +355,28 @@ def _parse_ask_args(argv: List[str]):
                 opts["schema_snapshot"] = SnapshotFileProvider(argv[i]).load()
             except SchemaSnapshotError as e:
                 return None, f"--schema-file inválido: {e}"
+        elif arg == "--cwe-check":
+            if i + 1 >= len(argv):
+                return None, "--cwe-check requiere un valor ('CWE-ID:rationale')."
+            i += 1
+            value = argv[i]
+            if ":" not in value:
+                return None, (
+                    "--cwe-check requiere 'CWE-ID:rationale' — el rationale es "
+                    "obligatorio."
+                )
+            cwe_id, rationale = value.split(":", 1)
+            if not re.match(r"^CWE-\d+$", cwe_id):
+                return None, (
+                    f"--cwe-check: CWE-ID inválido {cwe_id!r}. Formato esperado: "
+                    f"'CWE-<número>' (p. ej. 'CWE-89')."
+                )
+            if not rationale.strip():
+                return None, (
+                    "--cwe-check requiere 'CWE-ID:rationale' — el rationale es "
+                    "obligatorio."
+                )
+            opts["cwe_checks"].append((cwe_id, rationale.strip()))
         elif arg.startswith("--"):
             return None, f"Flag desconocida: {arg}"
         else:
@@ -390,6 +418,9 @@ async def main() -> int:
         print("      --schema-file FILE      Snapshot de schema (JSON/YAML) para contexto")
         print("                              relacional determinista. Lo exporta el llamador;")
         print("                              el motor no se conecta a ninguna base de datos.")
+        print("      --cwe-check ID:rationale  Repetible. Dispara triage de seguridad opt-in")
+        print("                              (Antares) sobre la implementación final. El")
+        print("                              rationale es obligatorio. Nunca gatea la pipeline.")
         print("  python main.py chat                                 # Modo interactivo (REPL)")
         return EXIT_USAGE
 
@@ -412,7 +443,7 @@ async def main() -> int:
             exit_code = await cli.ask_once(
                 opts["query"], as_json=opts["as_json"], out_path=opts["out_path"],
                 quiet=opts["quiet"], output_contract=opts["output_contract"],
-                schema_snapshot=opts["schema_snapshot"],
+                schema_snapshot=opts["schema_snapshot"], cwe_checks=opts["cwe_checks"],
             )
         elif command == "chat":
             await cli.interactive_shell()
