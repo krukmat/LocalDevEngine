@@ -1,0 +1,220 @@
+{
+  "artifacts": {
+    "breakdown": "1. Add a /health route.\n2. Return 200 with a status payload.",
+    "closing_report": "DEVIATION: NONE\nSUMMARY: Implemented exactly as planned.",
+    "implementation": "def health():\n    return {'status': 'ok'}, 200",
+    "plan": "## Data Model\nPlan detail for Data Model.\n\n## API/Interface\nPlan detail for API/Interface.\n\n## Error Handling\nPlan detail for Error Handling.\n\n## Dependencies/Integration\nPlan detail for Dependencies/Integration."
+  },
+  "breakdown": "1. Add a /health route.\n2. Return 200 with a status payload.",
+  "closing_report": "DEVIATION: NONE\nSUMMARY: Implemented exactly as planned.",
+  "config_fingerprint": {
+    "closing_report_enabled": true,
+    "max_qa_iterations": 2,
+    "models": {
+      "architect": "muse-glimmer:30b-q4_K_M",
+      "copilot": "granite-code:8b",
+      "implementer": "qwen3.6:27b-q4_K_M",
+      "manager": "gemma4:26b-a4b-it-qat",
+      "qa_auditor": "muse-glimmer:30b-q4_K_M",
+      "router": "phi3:mini"
+    },
+    "request": {
+      "cwe_checks_requested": [],
+      "output_contract": null,
+      "schema_grounding": false,
+      "schema_tables": 0
+    },
+    "retrieval": {
+      "breakdown_reserve_chars": 1200,
+      "max_context_chars": 6000,
+      "min_score": 0.0,
+      "top_k": 5
+    },
+    "schema_grounding": {
+      "allow_new_objects": true,
+      "fk_expansion_depth": 1,
+      "identifier_check": true,
+      "max_chars": 4000,
+      "max_tables": 12
+    },
+    "security_triage": {
+      "binary": "antares",
+      "orchestration_timeout_seconds": 330,
+      "profile": "antares-local",
+      "timeout_seconds": 300
+    }
+  },
+  "deviation": "NONE",
+  "error": null,
+  "fast_path": false,
+  "implementation": "def health():\n    return {'status': 'ok'}, 200",
+  "macro_iteration": 1,
+  "outcome": {
+    "closing_report": {
+      "deviation": "NONE",
+      "ran": true,
+      "summary": "Implemented exactly as planned."
+    },
+    "context_budget": {
+      "breakdown_chars": 86,
+      "max_total_chars": 6000,
+      "over_budget": false,
+      "prior_report_chars": 0,
+      "rag_chars": 5791,
+      "rag_pieces_dropped": 3,
+      "rag_pieces_included": 2,
+      "ran": true,
+      "reserved_chars": 0,
+      "schema_chars": 0,
+      "used_chars": 5927
+    },
+    "design_gate": {
+      "approved": true,
+      "mode": "sectioned",
+      "ran": true,
+      "sections": {
+        "API/Interface": {
+          "approved": true,
+          "attempts": 1
+        },
+        "Data Model": {
+          "approved": true,
+          "attempts": 1
+        },
+        "Dependencies/Integration": {
+          "approved": true,
+          "attempts": 1
+        },
+        "Error Handling": {
+          "approved": true,
+          "attempts": 1
+        }
+      }
+    },
+    "fast_path": false,
+    "implementation_check": {
+      "approved": true,
+      "attempts": 1,
+      "feedback": null,
+      "ran": true
+    },
+    "rag": {
+      "chunks_eligible": 5,
+      "chunks_retrieved": 5,
+      "chunks_used": 2,
+      "context_chars": 5791,
+      "ran": true,
+      "scores": [
+        0.064,
+        0.059,
+        0.048,
+        0.046,
+        0.045
+      ],
+      "sources": [
+        "/Users/matias/LocalDevEngine/README_DOCUMENTATION.md",
+        "/Users/matias/LocalDevEngine/core/chunking.py",
+        "/Users/matias/LocalDevEngine/core/ingestor.py",
+        "/Users/matias/LocalDevEngine/main.py",
+        "/Users/matias/LocalDevEngine/memory/local_memory.py"
+      ]
+    },
+    "router_decision": "CODING_REQUEST",
+    "schema_grounding": {
+      "ran": false
+    },
+    "security_triage": {
+      "degraded": false,
+      "findings": [],
+      "ran": false,
+      "requested": [],
+      "stdout_sha256": null,
+      "terminal_state": "not-requested"
+    }
+  },
+  "plan": "## Data Model\nPlan detail for Data Model.\n\n## API/Interface\nPlan detail for API/Interface.\n\n## Error Handling\nPlan detail for Error Handling.\n\n## Dependencies/Integration\nPlan detail for Dependencies/Integration.",
+  "qa_approved": true,
+  "qa_feedback": null,
+  "query": "Add a health check endpoint to the API.",
+  "query_sha256": "5221a3b7884801146a0db7f00b5eac2ca67e4b6ca0ca2c3900ad85920b8b524e",
+  "schema_version": "1.2",
+  "status": "completed",
+  "trace": [
+    {
+      "attempt": null,
+      "decision": "CODING_REQUEST",
+      "model": "fake-router",
+      "role": "router",
+      "stage": "routing",
+      "verdict": null
+    },
+    {
+      "attempt": null,
+      "model": "fake-manager",
+      "role": "manager",
+      "stage": "task_breakdown",
+      "verdict": null
+    },
+    {
+      "attempt": 1,
+      "model": "fake-architect",
+      "role": "architect",
+      "stage": "design_plan",
+      "verdict": null
+    },
+    {
+      "attempt": 1,
+      "model": "fake-qa_auditor",
+      "role": "qa_auditor",
+      "section": "Data Model",
+      "stage": "design_gate",
+      "verdict": "APPROVED"
+    },
+    {
+      "attempt": 1,
+      "model": "fake-qa_auditor",
+      "role": "qa_auditor",
+      "section": "API/Interface",
+      "stage": "design_gate",
+      "verdict": "APPROVED"
+    },
+    {
+      "attempt": 1,
+      "model": "fake-qa_auditor",
+      "role": "qa_auditor",
+      "section": "Error Handling",
+      "stage": "design_gate",
+      "verdict": "APPROVED"
+    },
+    {
+      "attempt": 1,
+      "model": "fake-qa_auditor",
+      "role": "qa_auditor",
+      "section": "Dependencies/Integration",
+      "stage": "design_gate",
+      "verdict": "APPROVED"
+    },
+    {
+      "attempt": 1,
+      "model": "fake-implementer",
+      "role": "implementer",
+      "stage": "implementation",
+      "verdict": null
+    },
+    {
+      "attempt": 1,
+      "model": "fake-qa_auditor",
+      "role": "qa_auditor",
+      "stage": "implementation_check",
+      "verdict": "APPROVED"
+    },
+    {
+      "attempt": null,
+      "deviation": "NONE",
+      "model": "fake-manager",
+      "role": "manager",
+      "stage": "closing_report",
+      "verdict": null
+    }
+  ]
+}

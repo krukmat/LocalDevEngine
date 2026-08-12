@@ -1,0 +1,103 @@
+{
+  "artifacts": {
+    "implementation": "HTTP 404 means Not Found: the server can't find the requested resource."
+  },
+  "breakdown": null,
+  "closing_report": null,
+  "config_fingerprint": {
+    "closing_report_enabled": true,
+    "max_qa_iterations": 2,
+    "models": {
+      "architect": "muse-glimmer:30b-q4_K_M",
+      "copilot": "granite-code:8b",
+      "implementer": "qwen3.6:27b-q4_K_M",
+      "manager": "gemma4:26b-a4b-it-qat",
+      "qa_auditor": "muse-glimmer:30b-q4_K_M",
+      "router": "phi3:mini"
+    },
+    "request": {
+      "cwe_checks_requested": [],
+      "output_contract": null,
+      "schema_grounding": false,
+      "schema_tables": 0
+    },
+    "retrieval": {
+      "breakdown_reserve_chars": 1200,
+      "max_context_chars": 6000,
+      "min_score": 0.0,
+      "top_k": 5
+    },
+    "schema_grounding": {
+      "allow_new_objects": true,
+      "fk_expansion_depth": 1,
+      "identifier_check": true,
+      "max_chars": 4000,
+      "max_tables": 12
+    },
+    "security_triage": {
+      "binary": "antares",
+      "orchestration_timeout_seconds": 330,
+      "profile": "antares-local",
+      "timeout_seconds": 300
+    }
+  },
+  "deviation": null,
+  "error": null,
+  "fast_path": true,
+  "implementation": "HTTP 404 means Not Found: the server can't find the requested resource.",
+  "macro_iteration": 1,
+  "outcome": {
+    "closing_report": {
+      "ran": false
+    },
+    "context_budget": {
+      "ran": false
+    },
+    "design_gate": {
+      "ran": false
+    },
+    "fast_path": true,
+    "implementation_check": {
+      "ran": false
+    },
+    "rag": {
+      "ran": false
+    },
+    "router_decision": "SIMPLE_TASK",
+    "schema_grounding": {
+      "ran": false
+    },
+    "security_triage": {
+      "degraded": false,
+      "findings": [],
+      "ran": false,
+      "requested": [],
+      "stdout_sha256": null,
+      "terminal_state": "not-requested"
+    }
+  },
+  "plan": null,
+  "qa_approved": null,
+  "qa_feedback": null,
+  "query": "What does HTTP 404 mean?",
+  "query_sha256": "5d0ca4c6ad18a416c65220fb46170c699580c6fd47935ffc94b18cba68a69ea0",
+  "schema_version": "1.2",
+  "status": "completed",
+  "trace": [
+    {
+      "attempt": null,
+      "decision": "SIMPLE_TASK",
+      "model": "fake-router",
+      "role": "router",
+      "stage": "routing",
+      "verdict": null
+    },
+    {
+      "attempt": null,
+      "model": "fake-manager",
+      "role": "manager",
+      "stage": "fast_path",
+      "verdict": null
+    }
+  ]
+}
