@@ -19,6 +19,7 @@ from context.schema import (
     render_schema_block,
     select_tables,
 )
+from core.pipeline.context import PipelineContext
 from context.antares import (
     AntaresInvocationError,
     materialize_implementation,
@@ -744,33 +745,45 @@ class Orchestrator:
         control flow of the pipeline itself having to know about either concern. Returns
         {"outcome": ..., "artifacts": ..., "legacy": ...} — three views of the same run
         that run_complex_task combines into the final receipt.
+
+        Shared state (query, trace, breakdown, plan, implementation, ...) lives on a
+        PipelineContext (O3, docs/plan-p1-refactor-orchestrator.md) instead of loose
+        locals, so later stage extractions (O4+) can pass `ctx` around instead of
+        growing every stage's signature each time another stage needs one more field.
         """
+        ctx = PipelineContext(
+            user_query=user_query, request_id=request_id, trace=trace, on_chunk=on_chunk,
+            prior_breakdown=prior_breakdown, prior_report=prior_report,
+            macro_iteration=macro_iteration, output_contract=output_contract,
+            schema_snapshot=schema_snapshot,
+        )
+
         # 0. Router: classify and short-circuit simple/error-reaction queries.
         # Skipped entirely on a macro-loop re-entry (prior_breakdown given) — we already
         # know this is a full-pipeline task, and re-classifying risks a fast-path misroute
         # that would silently discard the whole prior attempt.
-        if prior_breakdown is not None:
-            decision = "COMPLEX_ARCHITECTURE"
+        if ctx.prior_breakdown is not None:
+            ctx.decision = "COMPLEX_ARCHITECTURE"
             logger.info(
                 "Macro-loop re-entry: skipping Router, forcing full pipeline",
-                extra={"request_id": request_id, "stage": "routing"}
+                extra={"request_id": ctx.request_id, "stage": "routing"}
             )
         else:
-            decision = await self._get_router_decision(user_query, request_id, trace)
-        if decision in self.FAST_PATH_CATEGORIES:
+            ctx.decision = await self._get_router_decision(ctx.user_query, ctx.request_id, ctx.trace)
+        if ctx.decision in self.FAST_PATH_CATEGORIES:
             logger.info(
-                "Router fast path (%s) — skipping RAG/Architect/Implementer/QA", decision,
-                extra={"request_id": request_id, "stage": "fast_path"}
+                "Router fast path (%s) — skipping RAG/Architect/Implementer/QA", ctx.decision,
+                extra={"request_id": ctx.request_id, "stage": "fast_path"}
             )
             manager = self.factory.create_role_model("manager")
             answer, entry = await self._call_model(
                 role="manager", stage="fast_path", model=manager,
-                prompt=user_query, request_id=request_id, on_chunk=on_chunk
+                prompt=ctx.user_query, request_id=ctx.request_id, on_chunk=ctx.on_chunk
             )
-            trace.append(entry)
+            ctx.trace.append(entry)
             return {
                 "outcome": {
-                    "router_decision": decision,
+                    "router_decision": ctx.decision,
                     "fast_path": True,
                     "rag": {"ran": False},
                     # A schema snapshot may have been supplied and still not used:
@@ -792,32 +805,30 @@ class Orchestrator:
                     "breakdown": None,
                     "closing_report": None,
                     "deviation": None,
-                    "request_id": request_id,
-                    "trace": trace,
-                    "macro_iteration": macro_iteration,
+                    "request_id": ctx.request_id,
+                    "trace": ctx.trace,
+                    "macro_iteration": ctx.macro_iteration,
                 },
             }
 
         max_iterations = self.config.get('pipeline', {}).get('max_qa_iterations', 2)
 
         # 1a. Deterministic schema context (highest-authority block, model-free).
-        schema_block = ""
-        schema_stats: Dict[str, Any] = {"ran": False}
-        if schema_snapshot is not None:
-            schema_block, schema_stats = self._build_schema_context(
-                schema_snapshot, user_query, request_id
+        if ctx.schema_snapshot is not None:
+            ctx.schema_block, ctx.schema_stats = self._build_schema_context(
+                ctx.schema_snapshot, ctx.user_query, ctx.request_id
             )
 
         # 1b. Context Retrieval (RAG) — lowest-priority block in the shared budget.
-        rag_pieces, rag_stats = await self._build_rag_context(user_query, request_id)
+        ctx.rag_pieces, ctx.rag_stats = await self._build_rag_context(ctx.user_query, ctx.request_id)
 
         # Assembled once here for the Manager, reserving room for the outline it is
         # about to write, then assembled again below with the real outline. Without
         # the reservation the Manager would see chunks the Architect then loses.
         breakdown_reserve = self.config.get('retrieval', {}).get('breakdown_reserve_chars', 1200)
-        context, _ = self._assemble_context(
-            request_id=request_id, schema_block=schema_block, rag_pieces=rag_pieces,
-            prior_report=prior_report, reserve_chars=breakdown_reserve,
+        ctx.context, _ = self._assemble_context(
+            request_id=ctx.request_id, schema_block=ctx.schema_block, rag_pieces=ctx.rag_pieces,
+            prior_report=ctx.prior_report, reserve_chars=breakdown_reserve,
         )
 
         # 2. Manager: break the goal into a step outline that guides the Architect.
@@ -826,41 +837,41 @@ class Orchestrator:
         # the second closing report gets measured against, making the two reports
         # incomparable (see docs/plan-macro-loop-manager-hitl.md, "otras decisiones").
         manager = self.factory.create_role_model("manager")
-        if prior_breakdown is not None:
-            breakdown = prior_breakdown
+        if ctx.prior_breakdown is not None:
+            ctx.breakdown = ctx.prior_breakdown
             logger.info(
                 "Macro-loop re-entry: reusing prior breakdown, skipping task_breakdown",
-                extra={"request_id": request_id, "stage": "task_breakdown"}
+                extra={"request_id": ctx.request_id, "stage": "task_breakdown"}
             )
         else:
-            breakdown, entry = await self._call_model(
+            ctx.breakdown, entry = await self._call_model(
                 role="manager", stage="task_breakdown", model=manager,
-                prompt=self.prompts.get_manager_breakdown_template(context, user_query),
-                request_id=request_id
+                prompt=self.prompts.get_manager_breakdown_template(ctx.context, ctx.user_query),
+                request_id=ctx.request_id
             )
-            trace.append(entry)
+            ctx.trace.append(entry)
         # Final assembly, now that every block exists. This is the context every
         # downstream stage sees, and the only one whose numbers reach the receipt.
-        context, budget_stats = self._assemble_context(
-            request_id=request_id, schema_block=schema_block, rag_pieces=rag_pieces,
-            breakdown=breakdown, prior_report=prior_report,
+        ctx.context, ctx.budget_stats = self._assemble_context(
+            request_id=ctx.request_id, schema_block=ctx.schema_block, rag_pieces=ctx.rag_pieces,
+            breakdown=ctx.breakdown, prior_report=ctx.prior_report,
         )
-        rag_stats["chunks_used"] = budget_stats["rag_pieces_included"]
-        rag_stats["context_chars"] = budget_stats["rag_chars"]
+        ctx.rag_stats["chunks_used"] = ctx.budget_stats["rag_pieces_included"]
+        ctx.rag_stats["context_chars"] = ctx.budget_stats["rag_chars"]
 
         # 3. Architecture Phase with QA design gate (pre-implementation)
         architect = self.factory.create_role_model("architect")
         qa_auditor = self.factory.create_role_model("qa_auditor")
 
-        plan, entry = await self._call_model(
+        ctx.plan, entry = await self._call_model(
             role="architect", stage="design_plan", model=architect,
-            prompt=self.prompts.get_architect_thinking_template(context, user_query),
-            request_id=request_id, attempt=1, on_chunk=on_chunk
+            prompt=self.prompts.get_architect_thinking_template(ctx.context, ctx.user_query),
+            request_id=ctx.request_id, attempt=1, on_chunk=ctx.on_chunk
         )
-        trace.append(entry)
+        ctx.trace.append(entry)
 
         section_names = self.prompts.SECTION_NAMES
-        sections = _split_plan_sections(plan, section_names)
+        sections = _split_plan_sections(ctx.plan, section_names)
         if sections is not None:
             # Sectioned design gate: each section is reviewed and — if rejected —
             # regenerated independently, instead of regenerating the whole plan for
@@ -869,7 +880,7 @@ class Orchestrator:
             # on a revision reply), so a formatting slip can't strand the pipeline.
             logger.info(
                 "Design gate: sectioned review (%d sections)", len(sections),
-                extra={"request_id": request_id, "stage": "design_gate"}
+                extra={"request_id": ctx.request_id, "stage": "design_gate"}
             )
             all_approved = True
             for section_name in section_names:
@@ -880,17 +891,17 @@ class Orchestrator:
                     review, qa_entry = await self._call_model(
                         role="qa_auditor", stage="design_gate", model=qa_auditor,
                         prompt=self.prompts.get_section_review_template(
-                            context, user_query, section_name, section_text, full_plan
+                            ctx.context, ctx.user_query, section_name, section_text, full_plan
                         ),
-                        request_id=request_id, attempt=attempt + 1
+                        request_id=ctx.request_id, attempt=attempt + 1
                     )
                     section_approved, section_feedback = self._parse_verdict(review)
                     qa_entry["verdict"] = "APPROVED" if section_approved else "NEEDS_REVISION"
                     qa_entry["section"] = section_name
-                    trace.append(qa_entry)
+                    ctx.trace.append(qa_entry)
                     logger.info(
                         "Design gate [%s] attempt %d: %s", section_name, attempt + 1, qa_entry["verdict"],
-                        extra={"request_id": request_id, "stage": "design_gate", "attempt": attempt + 1}
+                        extra={"request_id": ctx.request_id, "stage": "design_gate", "attempt": attempt + 1}
                     )
                     if section_approved:
                         break
@@ -898,119 +909,124 @@ class Orchestrator:
                         logger.warning(
                             "Design gate [%s] not approved after %d revisions — keeping last version",
                             section_name, max_iterations,
-                            extra={"request_id": request_id, "stage": "design_gate"}
+                            extra={"request_id": ctx.request_id, "stage": "design_gate"}
                         )
                         break
                     section_text, entry = await self._call_model(
                         role="architect", stage="design_revision", model=architect,
                         prompt=self.prompts.get_section_revision_template(
-                            context, user_query, section_name, section_text, section_feedback, full_plan
+                            ctx.context, ctx.user_query, section_name, section_text, section_feedback, full_plan
                         ),
-                        request_id=request_id, attempt=attempt + 2, on_chunk=on_chunk
+                        request_id=ctx.request_id, attempt=attempt + 2, on_chunk=ctx.on_chunk
                     )
-                    trace.append(entry)
+                    ctx.trace.append(entry)
                     sections[section_name] = section_text
                 all_approved = all_approved and section_approved
-            plan = _join_plan_sections(sections, section_names)
+            ctx.plan = _join_plan_sections(sections, section_names)
             logger.info(
                 "Design gate sectioned result: %s", "APPROVED" if all_approved else "NEEDS_REVISION (partial)",
-                extra={"request_id": request_id, "stage": "design_gate"}
+                extra={"request_id": ctx.request_id, "stage": "design_gate"}
             )
             section_attempts = {}
-            for qa_entry in trace:
+            for qa_entry in ctx.trace:
                 if qa_entry.get("stage") == "design_gate" and "section" in qa_entry:
                     section_attempts.setdefault(qa_entry["section"], {"approved": False, "attempts": 0})
                     section_attempts[qa_entry["section"]]["attempts"] += 1
                     section_attempts[qa_entry["section"]]["approved"] = qa_entry["verdict"] == "APPROVED"
-            design_gate_outcome = {
+            ctx.design_gate_outcome = {
                 "ran": True, "mode": "sectioned", "approved": all_approved,
                 "sections": section_attempts,
             }
         else:
             logger.info(
                 "Design gate: Architect didn't follow the section format — falling back to monolithic review",
-                extra={"request_id": request_id, "stage": "design_gate"}
+                extra={"request_id": ctx.request_id, "stage": "design_gate"}
             )
             for attempt in range(max_iterations + 1):
                 review, qa_entry = await self._call_model(
                     role="qa_auditor", stage="design_gate", model=qa_auditor,
-                    prompt=self.prompts.get_design_review_template(context, user_query, plan),
-                    request_id=request_id, attempt=attempt + 1
+                    prompt=self.prompts.get_design_review_template(ctx.context, ctx.user_query, ctx.plan),
+                    request_id=ctx.request_id, attempt=attempt + 1
                 )
                 design_approved, design_feedback = self._parse_verdict(review)
                 qa_entry["verdict"] = "APPROVED" if design_approved else "NEEDS_REVISION"
-                trace.append(qa_entry)
+                ctx.trace.append(qa_entry)
                 logger.info(
                     "Design gate attempt %d: %s", attempt + 1, qa_entry["verdict"],
-                    extra={"request_id": request_id, "stage": "design_gate", "attempt": attempt + 1}
+                    extra={"request_id": ctx.request_id, "stage": "design_gate", "attempt": attempt + 1}
                 )
                 if design_approved:
                     break
                 if attempt == max_iterations:
                     logger.warning(
                         "Design gate not approved after %d revisions — proceeding with last plan",
-                        max_iterations, extra={"request_id": request_id, "stage": "design_gate"}
+                        max_iterations, extra={"request_id": ctx.request_id, "stage": "design_gate"}
                     )
                     break
-                plan, entry = await self._call_model(
+                ctx.plan, entry = await self._call_model(
                     role="architect", stage="design_revision", model=architect,
-                    prompt=self.prompts.get_architect_revision_template(context, user_query, plan, design_feedback),
-                    request_id=request_id, attempt=attempt + 2, on_chunk=on_chunk
+                    prompt=self.prompts.get_architect_revision_template(
+                        ctx.context, ctx.user_query, ctx.plan, design_feedback
+                    ),
+                    request_id=ctx.request_id, attempt=attempt + 2, on_chunk=ctx.on_chunk
                 )
-                trace.append(entry)
-            design_gate_outcome = {"ran": True, "mode": "monolithic", "approved": design_approved}
+                ctx.trace.append(entry)
+            ctx.design_gate_outcome = {"ran": True, "mode": "monolithic", "approved": design_approved}
 
         # 4. Implementation Phase with post-implementation QA check
         implementer = self.factory.create_role_model("implementer")
 
-        implementation, entry = await self._call_model(
+        ctx.implementation, entry = await self._call_model(
             role="implementer", stage="implementation", model=implementer,
-            prompt=self.prompts.get_implementer_task_template(plan, context, output_contract=output_contract),
-            request_id=request_id, attempt=1, on_chunk=on_chunk
+            prompt=self.prompts.get_implementer_task_template(
+                ctx.plan, ctx.context, output_contract=ctx.output_contract
+            ),
+            request_id=ctx.request_id, attempt=1, on_chunk=ctx.on_chunk
         )
-        trace.append(entry)
+        ctx.trace.append(entry)
 
-        qa_approved = False
-        qa_feedback = None
-        implementation_check_attempts = 0
         for attempt in range(max_iterations + 1):
             review, qa_entry = await self._call_model(
                 role="qa_auditor", stage="implementation_check", model=qa_auditor,
                 prompt=self.prompts.get_qa_review_template(
-                    user_query, plan, implementation, output_contract=output_contract
+                    ctx.user_query, ctx.plan, ctx.implementation, output_contract=ctx.output_contract
                 ),
-                request_id=request_id, attempt=attempt + 1
+                request_id=ctx.request_id, attempt=attempt + 1
             )
-            implementation_check_attempts += 1
-            qa_approved, qa_feedback = self._parse_verdict(review)
-            qa_entry["verdict"] = "APPROVED" if qa_approved else "NEEDS_REVISION"
-            trace.append(qa_entry)
+            ctx.implementation_check_attempts += 1
+            ctx.qa_approved, ctx.qa_feedback = self._parse_verdict(review)
+            qa_entry["verdict"] = "APPROVED" if ctx.qa_approved else "NEEDS_REVISION"
+            ctx.trace.append(qa_entry)
             logger.info(
                 "Implementation check attempt %d: %s", attempt + 1, qa_entry["verdict"],
-                extra={"request_id": request_id, "stage": "implementation_check", "attempt": attempt + 1}
+                extra={"request_id": ctx.request_id, "stage": "implementation_check", "attempt": attempt + 1}
             )
-            if qa_approved:
-                qa_feedback = None
+            if ctx.qa_approved:
+                ctx.qa_feedback = None
                 break
             if attempt == max_iterations:
                 logger.warning(
                     "Implementation not approved by QA after %d revisions",
-                    max_iterations, extra={"request_id": request_id, "stage": "implementation_check"}
+                    max_iterations, extra={"request_id": ctx.request_id, "stage": "implementation_check"}
                 )
                 break
             # Design-level feedback loop: QA's implementation findings go back to the Architect first.
-            plan, entry = await self._call_model(
+            ctx.plan, entry = await self._call_model(
                 role="architect", stage="design_revision", model=architect,
-                prompt=self.prompts.get_architect_revision_template(context, user_query, plan, qa_feedback),
-                request_id=request_id, attempt=attempt + 2, on_chunk=on_chunk
+                prompt=self.prompts.get_architect_revision_template(
+                    ctx.context, ctx.user_query, ctx.plan, ctx.qa_feedback
+                ),
+                request_id=ctx.request_id, attempt=attempt + 2, on_chunk=ctx.on_chunk
             )
-            trace.append(entry)
-            implementation, entry = await self._call_model(
+            ctx.trace.append(entry)
+            ctx.implementation, entry = await self._call_model(
                 role="implementer", stage="implementation", model=implementer,
-                prompt=self.prompts.get_implementer_task_template(plan, context, output_contract=output_contract),
-                request_id=request_id, attempt=attempt + 2, on_chunk=on_chunk
+                prompt=self.prompts.get_implementer_task_template(
+                    ctx.plan, ctx.context, output_contract=ctx.output_contract
+                ),
+                request_id=ctx.request_id, attempt=attempt + 2, on_chunk=ctx.on_chunk
             )
-            trace.append(entry)
+            ctx.trace.append(entry)
 
         # 5. Manager closing report: compares the final result against the Manager's OWN
         # original outline (step 2) — nothing else in the pipeline ever revisits it. Gated
@@ -1020,32 +1036,30 @@ class Orchestrator:
         # manager/qa_auditor share a model tag (see config/settings.yaml) — this call finds
         # its model already loaded under Ollama's single-slot config, so it costs generation
         # time only, not a model swap.
-        closing_report = None
-        deviation = None
         closing_report_ran = self.config.get('pipeline', {}).get('closing_report', True)
         if closing_report_ran:
             max_impl_chars = self.config.get('pipeline', {}).get(
                 'closing_report_max_implementation_chars', 8000
             )
-            impl_for_report = implementation
+            impl_for_report = ctx.implementation
             if len(impl_for_report) > max_impl_chars:
                 impl_for_report = (
                     impl_for_report[:max_impl_chars]
                     + "\n\n[... implementation truncated for closing report ...]"
                 )
-            closing_report, entry = await self._call_model(
+            ctx.closing_report, entry = await self._call_model(
                 role="manager", stage="closing_report", model=manager,
                 prompt=self.prompts.get_manager_closing_report_template(
-                    user_query, breakdown, plan, impl_for_report
+                    ctx.user_query, ctx.breakdown, ctx.plan, impl_for_report
                 ),
-                request_id=request_id, on_chunk=on_chunk
+                request_id=ctx.request_id, on_chunk=ctx.on_chunk
             )
-            deviation, summary = self._parse_closing_report(closing_report)
-            entry["deviation"] = deviation
-            trace.append(entry)
+            ctx.deviation, ctx.summary = self._parse_closing_report(ctx.closing_report)
+            entry["deviation"] = ctx.deviation
+            ctx.trace.append(entry)
             logger.info(
-                "Closing report: deviation=%s", deviation,
-                extra={"request_id": request_id, "stage": "closing_report"}
+                "Closing report: deviation=%s", ctx.deviation,
+                extra={"request_id": ctx.request_id, "stage": "closing_report"}
             )
 
         # Deterministic conformance check (docs/plan-schema-conformance.md).
@@ -1057,55 +1071,55 @@ class Orchestrator:
         # is this pipeline grading its own work. AST-based (segmentation.py +
         # extraction.py), not the regex-based check_identifiers() it replaces —
         # see docs/fase3-decision.md for why that instrument was unusable.
-        if schema_snapshot is not None and self.config.get('schema_grounding', {}).get(
+        if ctx.schema_snapshot is not None and self.config.get('schema_grounding', {}).get(
             'identifier_check', True
         ):
             allow_new_objects = self.config.get('schema_grounding', {}).get(
                 'allow_new_objects', True
             )
             conformance_report = check_conformance(
-                implementation or "", schema_snapshot, allow_new_objects=allow_new_objects
+                ctx.implementation or "", ctx.schema_snapshot, allow_new_objects=allow_new_objects
             )
-            schema_stats["conformance_check"] = conformance_report.to_dict()
+            ctx.schema_stats["conformance_check"] = conformance_report.to_dict()
             logger.info(
                 "Conformance check: verdict=%s violations=%d checked=%d",
                 conformance_report.verdict, len(conformance_report.violations),
                 conformance_report.regions_checked,
-                extra={"request_id": request_id, "stage": "schema_grounding"}
+                extra={"request_id": ctx.request_id, "stage": "schema_grounding"}
             )
 
         return {
             "outcome": {
-                "router_decision": decision,
+                "router_decision": ctx.decision,
                 "fast_path": False,
-                "rag": rag_stats,
-                "schema_grounding": schema_stats,
-                "context_budget": {"ran": True, **budget_stats},
-                "design_gate": design_gate_outcome,
+                "rag": ctx.rag_stats,
+                "schema_grounding": ctx.schema_stats,
+                "context_budget": {"ran": True, **ctx.budget_stats},
+                "design_gate": ctx.design_gate_outcome,
                 "implementation_check": {
-                    "ran": True, "approved": qa_approved,
-                    "attempts": implementation_check_attempts, "feedback": qa_feedback,
+                    "ran": True, "approved": ctx.qa_approved,
+                    "attempts": ctx.implementation_check_attempts, "feedback": ctx.qa_feedback,
                 },
                 "closing_report": (
-                    {"ran": True, "deviation": deviation, "summary": summary}
+                    {"ran": True, "deviation": ctx.deviation, "summary": ctx.summary}
                     if closing_report_ran else {"ran": False}
                 ),
             },
             "artifacts": {
-                "breakdown": breakdown, "plan": plan, "implementation": implementation,
-                "closing_report": closing_report,
+                "breakdown": ctx.breakdown, "plan": ctx.plan, "implementation": ctx.implementation,
+                "closing_report": ctx.closing_report,
             },
             "legacy": {
-                "plan": plan,
-                "implementation": implementation,
+                "plan": ctx.plan,
+                "implementation": ctx.implementation,
                 "fast_path": False,
-                "qa_approved": qa_approved,
-                "qa_feedback": qa_feedback,
-                "breakdown": breakdown,
-                "closing_report": closing_report,
-                "deviation": deviation,
-                "request_id": request_id,
-                "trace": trace,
-                "macro_iteration": macro_iteration,
+                "qa_approved": ctx.qa_approved,
+                "qa_feedback": ctx.qa_feedback,
+                "breakdown": ctx.breakdown,
+                "closing_report": ctx.closing_report,
+                "deviation": ctx.deviation,
+                "request_id": ctx.request_id,
+                "trace": ctx.trace,
+                "macro_iteration": ctx.macro_iteration,
             },
         }
