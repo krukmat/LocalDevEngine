@@ -1109,14 +1109,3 @@ class Orchestrator:
                 "macro_iteration": macro_iteration,
             },
         }
-
-    async def run_simple_query(self, user_query: str) -> str:
-        """Standalone quick-answer workflow (also used internally as the Router fast path)."""
-        request_id = uuid.uuid4().hex[:12]
-        logger.info("run_simple_query started", extra={"request_id": request_id, "stage": "fast_path"})
-        manager = self.factory.create_role_model("manager")
-        answer, _entry = await self._call_model(
-            role="manager", stage="fast_path", model=manager,
-            prompt=user_query, request_id=request_id
-        )
-        return answer

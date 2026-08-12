@@ -198,27 +198,19 @@ def test_scenarios_match_golden():
         )
 
 
-def test_run_simple_query_has_no_callers():
-    """O2's precondition: run_simple_query must be dead code before it's
-    deleted. This greps the two real call sites (main.py, core/orchestrator.py
-    itself) rather than the whole repo, since a grep hit inside this test file
-    or inside docs/ would be a false positive."""
+def test_run_simple_query_is_deleted():
+    """O2: run_simple_query was dead code (verified by the pre-O2 version of
+    this test, which required exactly 2 occurrences — the def and its
+    docstring self-reference — in core/orchestrator.py and zero in main.py)
+    and has now been removed. This guards against it silently coming back."""
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     for relpath in ("main.py", "core/orchestrator.py"):
         with open(os.path.join(repo_root, relpath)) as f:
             text = f.read()
-        occurrences = text.count("run_simple_query")
-        if relpath == "core/orchestrator.py":
-            assert occurrences == 2, (
-                f"Expected exactly 2 occurrences of run_simple_query in {relpath} "
-                f"(the def and its docstring self-reference), found {occurrences} — "
-                "re-check whether it has gained a real caller before deleting it in O2."
-            )
-        else:
-            assert "run_simple_query" not in text, (
-                f"{relpath} calls run_simple_query — it is not dead code, "
-                "O2 must not delete it."
-            )
+        assert "run_simple_query" not in text, (
+            f"{relpath} still references run_simple_query — O2 deleted it, "
+            "it should not reappear."
+        )
 
 
 if __name__ == "__main__":
@@ -226,7 +218,7 @@ if __name__ == "__main__":
         capture_goldens()
     else:
         failures = []
-        for fn in (test_goldens_exist, test_scenarios_match_golden, test_run_simple_query_has_no_callers):
+        for fn in (test_goldens_exist, test_scenarios_match_golden, test_run_simple_query_is_deleted):
             try:
                 fn()
                 print(f"PASS {fn.__name__}")
