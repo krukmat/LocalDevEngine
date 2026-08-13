@@ -54,15 +54,98 @@ No es una lista genérica: cada patrón cierra una estructura que **ya existe im
 | O1 | **Recibo golden**: capturar el recibo completo para entradas fijas, con modelos stubeados | 36 | Moderate | — | el golden se reproduce byte a byte |
 | O2 | Borrar `run_simple_query` (código muerto, línea 1113) | 21 | Low | O1 | ningún caller; golden intacto |
 | O3 | `PipelineContext` — objetivar el estado compartido | 32 | Moderate | O2 | golden intacto |
-| O4 | `PipelineStage` ABC + `OutcomeRecorder` | 28 | Moderate | O3 | golden intacto |
-| O5 | Extraer etapas de contexto (router, RAG, schema, assemble) | 38 | Moderate | O4 | golden intacto |
-| O6 | `ReviewLoop` (Template Method) — unifica los dos loops QA | **44** | Med-high | O4 | golden intacto |
-| O7 | Design gate como Strategy (*sectioned* \| monolítico) | 37 | Moderate | O6 | golden intacto |
-| O8 | Extraer etapas de implementación, closing report y conformance | 38 | Moderate | O6 | golden intacto |
-| O9 | `Orchestrator` como Facade — `run_complex_task` delgado, **firma intacta** | 40 | Moderate | O5, O7, O8 | golden intacto |
-| O10 | Verificación de equivalencia + `wc -l` de cada módulo | 20 | Low | O9 | recibo idéntico **y** todo módulo ≤ 500 líneas |
+| O5 [x] | Extraer etapas de contexto (router, RAG, schema, assemble) y definir/usar `PipelineStage` | 38 | Moderate | O3 | golden intacto |
+| O6 [x] | `ReviewLoop` (Template Method) — unifica los dos loops QA | **44** | Med-high | O3 | golden intacto |
+| O7 [x] | Design gate como Strategy (*sectioned* \| monolítico) | 37 | Moderate | O6 | golden intacto |
+| O8 [x] | Extraer etapas de implementación, closing report y conformance; definir/usar `OutcomeRecorder` | 38 | Moderate | O6 | golden intacto |
+| O9 [x] | `Orchestrator` como Facade — `run_complex_task` delgado, **firma intacta** | 40 | Moderate | O5, O7, O8 | golden intacto |
+| O10 [x] | Verificación de equivalencia + `wc -l` de cada módulo | 20 | Low | O9 | recibo idéntico **y** todo módulo ≤ 500 líneas |
 
-Módulos resultantes: `core/pipeline/{__init__,context,base,context_stages,review_loop,design_gate,impl_stages}.py`.
+Módulos resultantes: `core/pipeline/{__init__,context,base,context_stages,review_loop,design_gate,impl_stages,runner}.py`.
+
+## Cierre O5 — 2026-08-12
+
+### Reflection log
+
+Pasadas requeridas: 2 (`38` → Moderate).
+
+#### Pass 1
+
+- Draft verdict: extraer router, schema, RAG y ensamblado a etapas que mutan `PipelineContext`.
+- Critique findings: los scripts de diagnóstico aún invocaban `_get_router_decision` directamente.
+- Revisions applied: se dejó un adaptador mínimo de compatibilidad sobre `RouterStage`, sin duplicar lógica.
+
+#### Pass 2
+
+- Draft verdict: los golden existentes preservan fast path y pipeline completo.
+- Critique findings: no cubrían schema suministrado ni reentrada del macro-loop.
+- Revisions applied: se añadió `test_context_stages_cover_schema_and_macro_reentry` al runner golden.
+
+Review: agente (Reflection) — sin revisor externo, banda no lo exige.
+
+| Case ID | Tipo | Comportamiento | Evidencia de test | Resultado |
+|---|---|---|---|---|
+| HP-O5-01 | HP | fast path y receipt sin cambios | `test_scenarios_match_golden` | PASS |
+| HP-O5-02 | HP | pipeline completo y receipt byte a byte | `test_scenarios_match_golden` | PASS |
+| EC-O5-01 | EC | schema determinista atraviesa la etapa extraída | `test_context_stages_cover_schema_and_macro_reentry` | PASS |
+| EC-O5-02 | EC | reentrada macro fuerza ruta completa y reutiliza breakdown | `test_context_stages_cover_schema_and_macro_reentry` | PASS |
+
+Owner final verification: Codex, 2026-08-12. Verificado el refactor sin cambio de contrato con
+`.venv/bin/python tests/test_orchestrator_golden.py`, `.venv/bin/python -m pytest tests/test_orchestrator_golden.py -q`,
+`.venv/bin/python tests/run_conformance_gate.py`, `git diff --check` y `wc -l core/orchestrator.py core/pipeline/*.py`.
+
+## Cierre O6 y O7 — 2026-08-12
+
+`ReviewLoop` concentra la mecánica de reintentos QA sin tomar posesión de prompts, trazas o
+artefactos. Sobre esa base, `core/pipeline/design_gate.py` convierte los dos caminos ya existentes
+en estrategias explícitas: `SectionedDesignGate` conserva la revisión independiente por sección y
+`MonolithicDesignGate` conserva el fallback cuando el plan no cumple la gramática de secciones.
+`Orchestrator` solo crea los colaboradores y selecciona la estrategia aplicable.
+
+Verificado sin cambio de receipt con `.venv/bin/python tests/test_orchestrator_golden.py`,
+`.venv/bin/python -m pytest tests/test_orchestrator_golden.py -q`,
+`.venv/bin/python tests/run_conformance_gate.py` y `git diff --check`.
+
+## Cierre O8 — 2026-08-12
+
+`OutcomeRecorder` vive junto a `PipelineContext`: cada etapa publica su bloque de receipt al
+momento de correr (o de quedar explícitamente omitida), y el orquestador solo añade la decisión del
+router y el flag de fast path. `core/pipeline/impl_stages.py` concentra la generación/revisión de
+implementación, el closing report y el conformance check sin modificar prompts, orden de modelos,
+trazas ni contrato de receipt.
+
+Verificado con `.venv/bin/python tests/test_orchestrator_golden.py` (7/7),
+`.venv/bin/python -m pytest tests/test_orchestrator_golden.py -q` (7 passed),
+`.venv/bin/python tests/run_conformance_gate.py` (22 casos), `git diff --check` y
+`wc -l core/orchestrator.py core/pipeline/*.py`.
+
+## Cierre O9 — 2026-08-12
+
+`Orchestrator` conserva su constructor, recursos, adaptadores de compatibilidad y la firma pública
+de `run_complex_task`, que ahora solo delega en `PipelineRunner`. `core/pipeline/runner.py` compone
+las etapas extraídas y construye los receipts de éxito, timeout y fallo. Sus dependencias se inyectan
+desde la fachada, incluido el triage de seguridad, que se mantiene fuera del timeout principal y no
+puede degradar un resultado ya completado a fallo.
+
+Verificado con `.venv/bin/python -m pytest tests/test_orchestrator_golden.py -q` (incluido el guard
+de firma/fachada), `.venv/bin/python tests/run_antares_offline.py`,
+`.venv/bin/python tests/run_conformance_gate.py`, `git diff --check` y
+`wc -l core/orchestrator.py core/pipeline/*.py`.
+
+## Cierre O10 — 2026-08-12
+
+El golden offline pasó sus 8 pruebas, incluidos los dos receipts deterministas que se comparan con
+sus fixtures después de excluir únicamente `request_id` y los campos de tiempo volátiles. El gate de
+conformidad pasó los 22 casos (0 falsos positivos) y el runner offline de Antares pasó todos sus
+casos. `py_compile` y `git diff --check` no informaron errores.
+
+Todos los módulos del resultado cumplen G1: el mayor es `core/pipeline/runner.py` con 317 líneas;
+`core/orchestrator.py` quedó en 268 y los demás módulos de `core/pipeline/` están entre 0 y 225
+líneas.
+
+La auditoría externa prevista con Codex `sol-high` queda pendiente de P0: el perfil
+`[profiles.sol-high]` no está presente en `~/.codex/config.toml`. Esa configuración global es una
+tarea humana declarada por P0 y no se modifica desde este cierre.
 
 ## Reglas que gobiernan esta fase
 
@@ -81,7 +164,7 @@ Módulos resultantes: `core/pipeline/{__init__,context,base,context_stages,revie
 
 **P1 no se puede delegar a un agente local** — porque `orchestrator.py` mide 1122 líneas, que es
 exactamente la condición que el proyecto elimina. Es circular y no tiene salida elegante: la primera
-pasada (O1-O5) es humana o cloud. **Desde O5 en adelante los módulos extraídos ya están bajo el
+pasada (O1-O3 y O5) es humana o cloud. **Desde O5 en adelante los módulos extraídos ya están bajo el
 umbral**, y O6-O10 tocan archivos nuevos y chicos — delegables con normalidad.
 
 ## Gate de cierre
